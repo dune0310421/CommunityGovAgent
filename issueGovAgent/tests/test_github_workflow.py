@@ -201,7 +201,7 @@ class MainTests(OfflineTests):
                 "src.issue_checker.github_request", return_value=issue
             ) as api:
                 output = self.run_main(api)
-                self.assertEqual(output["result"]["status"], "no_match")
+                self.assertEqual(output["result"]["status"], "partial_match")
                 self.assertIn("缺少此必填章节", output["comment_body"])
                 self.assertEqual(api.call_count, 1)
 

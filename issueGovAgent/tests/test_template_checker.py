@@ -114,23 +114,29 @@ class CheckIssueTests(unittest.TestCase):
     def test_title_error_does_not_stop_collecting_field_problems(self):
         result = self.check("### 环境\n", title="启动失败")
         self.assertEqual(result, {
-            "status": "no_match", "matched_templates": [],
+            "status": "partial_match", "matched_templates": ["缺陷"],
             "checks": [{"template": "缺陷", "problems": [
                 {"field": "title", "reason": "title_prefix",
                  "message": "标题应以 '[Bug]: ' 开头"},
                 {"field": "问题描述", "reason": "missing_section",
-                 "message": "缺少此必填章节（不代表正文没有相关信息）"},
+                 "message": "缺少此必填章节"},
                 {"field": "环境", "reason": "empty_section",
                  "message": "此必填章节为空或仅含占位内容"},
             ]}],
         })
+
+    def test_no_matching_prefix_or_field_returns_no_match(self):
+        result = self.check("### 自定义章节\n启动失败", title="启动失败")
+        self.assertEqual(result["status"], "no_match")
+        self.assertEqual(result["matched_templates"], [])
+        self.assertEqual(set(result), {"status", "matched_templates", "checks"})
 
     def test_empty_content_and_exact_placeholders_fail(self):
         for content in ["", " \n ", "<!-- 待补充 -->", "_No response_",
                         "No response", "请描述问题", "#### Linux", "```\n```"]:
             with self.subTest(content=content):
                 result = self.check(f"### 问题描述\n{content}\n\n### 环境\nLinux")
-                self.assertEqual(result["status"], "no_match")
+                self.assertEqual(result["status"], "partial_match")
                 self.assertEqual([(p["field"], p["reason"]) for p in
                                   result["checks"][0]["problems"]],
                                  [("问题描述", "empty_section")])
@@ -164,7 +170,7 @@ class CheckIssueTests(unittest.TestCase):
 
     def test_prefix_space_is_significant_and_absent_prefix_is_unrestricted(self):
         body = "### 问题描述\n失败\n### 环境\nLinux"
-        self.assertEqual(self.check(body, title="[Bug]:失败")["status"], "no_match")
+        self.assertEqual(self.check(body, title="[Bug]:失败")["status"], "partial_match")
         unrestricted = template()
         del unrestricted["title"]
         self.assertEqual(check_issue("任意标题", body, [unrestricted])["status"], "pass")

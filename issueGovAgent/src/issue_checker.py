@@ -1,8 +1,13 @@
 """Issue 模板检查：本地校验，以及 GitHub 工作流读取和评论反馈。"""
 
+import html
 import json
 import os
 import re
+import signal
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib import request
@@ -14,6 +19,9 @@ MARKER = "<!-- issue-gov-agent -->" # 评论中的隐藏标记：配合机器人
 BOT_LOGIN = "github-actions[bot]"
 GITHUB_WEB_URL = "https://github.com"
 GITHUB_API_URL = "https://api.github.com"
+LLM_BASE_URL = "https://open.bigmodel.cn/api/anthropic"
+LLM_TIMEOUT = 120
+RECOMMEND_PROMPT = Path(__file__).resolve().parents[1] / "prompts/recommend_template.md"
 
 
 def load_templates(directory: str | Path) -> list[dict[str, Any]]:
@@ -116,7 +124,7 @@ def check_issue(
         body: Issue 的原始 Markdown 正文。
         templates: 待匹配的 YAML 模板字典列表，不能为空。
     Returns:
-        status 为 pass/no_match；matched_templates 为匹配模板名称列表；
+        status 为 pass/partial_match/no_match；matched_templates 为完全/部分匹配模板名称列表；
         checks 为各模板的差异，包含 template 名称及 problems 列表，
         每个问题包含 field、reason 和 message。
     """
@@ -125,7 +133,9 @@ def check_issue(
 
     # 本地检查：逐一对照模板的标题前缀、必填章节及占位内容
     sections = _sections(body)
-    checks = []
+    checks = [] # 记录各模板的检查结果
+    matched = [] # 记录候选模板
+    has_title_match = False
     for template in templates:
         fields = _fields(template)
         problems = []
@@ -143,7 +153,7 @@ def check_issue(
             label = attributes["label"].strip()
             if label not in sections:
                 problems.append({"field": label, "reason": "missing_section",
-                                 "message": "缺少此必填章节（不代表正文没有相关信息）"})
+                                 "message": "缺少此必填章节"})
                 continue
             content = sections[label]
             placeholders = {"", "_No response_", "No response",
@@ -152,34 +162,167 @@ def check_issue(
                 problems.append({"field": label, "reason": "empty_section",
                                  "message": "此必填章节为空或仅含占位内容"})
         checks.append({"template": template["name"], "problems": problems})
+        # 记录候选模板
+        if prefix and title.startswith(prefix):
+            if not has_title_match:
+                matched.clear() # 优先保留本次标题匹配的模板
+            has_title_match = True
+            matched.append(template["name"])
+        elif not has_title_match and any(
+            field["attributes"]["label"].strip() in sections for field in fields
+        ):
+            matched.append(template["name"])
 
-    # 满足任意一个模板就通过，返回匹配模板列表和各模板的检查结果
-    matched = [check["template"] for check in checks if not check["problems"]]
-    return {"status": "pass" if matched else "no_match",
-            "matched_templates": matched, "checks": checks}
+    # 返回匹配模板列表和各模板的检查结果
+    complete = [check["template"] for check in checks if not check["problems"]] # 检查是否完全匹配
+    status = "pass" if complete else "partial_match" if matched else "no_match"
+    return {"status": status, "matched_templates": complete or matched, "checks": checks}
+
+
+def recommend_template(
+    title: str, body: str, templates: list[dict[str, Any]],
+    agent_api_key: str, model: str = "glm-5.3",
+) -> dict[str, Any]:
+    """启动一次 Claude Code 任务，由 GLM 推荐模板，不修改格式检查结果。
+
+    Args:
+        title: Issue 原始标题。
+        body: Issue 原始 Markdown 正文。
+        templates: 仓库候选模板字典列表。
+        agent_api_key: 供 Claude Code 使用的 GLM Coding Plan Key；为空时不调用模型。
+        model: Agent 使用的模型名称，默认 glm-5.3。
+    Returns:
+        status 为 recommended / uncertain / unavailable，另含 template、reason。
+    """
+    if not agent_api_key.strip():
+        return {"status": "unavailable", "template": None,
+                "reason": "未配置 Agent Key，模板推荐未启用，请手动选择模板。"}
+    # 将模板信息整理为json传给模型
+    candidates = [{
+        "name": item["name"], "description": item.get("description", ""),
+        "title": item.get("title", ""),
+        "fields": [{"label": field["attributes"]["label"],
+                    "description": field["attributes"].get("description", ""),
+                    "required": field.get("validations", {}).get("required", False)}
+                   for field in _fields(item)],
+    } for item in templates]
+
+    # 启动子进程运行 Claude Code
+    try:
+        # 准备 Claude Code 的环境变量
+        env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
+               if key in os.environ}
+        env.update({
+            "ANTHROPIC_AUTH_TOKEN": agent_api_key,
+            "ANTHROPIC_BASE_URL": LLM_BASE_URL,
+            "API_TIMEOUT_MS": str(LLM_TIMEOUT * 1000),
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_AUTOUPDATER": "1",
+        })
+
+        # 准备 Claude Code 命令和数据
+        command = [
+            "claude", "--bare", "-p", "--model", model,
+            "--tools", "", "--no-session-persistence", "--max-turns", "3",
+            "--output-format", "json",
+            "--system-prompt", RECOMMEND_PROMPT.read_text(encoding="utf-8"),
+        ]
+        data = json.dumps({"issue": {"title": title, "body": body},
+                           "templates": candidates}, ensure_ascii=False)
+
+        # 新建子进程和临时目录，运行 Claude Code
+        with tempfile.TemporaryDirectory(prefix="issue-gov-") as directory:
+            env["CLAUDE_CONFIG_DIR"] = str(Path(directory) / ".claude")
+            with subprocess.Popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", cwd=directory, env=env, start_new_session=True,
+            ) as process:
+                try:
+                    output, stderr = process.communicate(data, timeout=LLM_TIMEOUT)
+                finally:
+                    # 清理子进程
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+
+        # 解析输出
+        try:
+            envelope = json.loads(output)
+        except ValueError:
+            raise ValueError(stderr.strip() or output.strip() or "Claude Code 未返回结果") from None
+        if not isinstance(envelope, dict):
+            raise ValueError("Claude Code 返回格式无效")
+        if (process.returncode != 0 or envelope.get("type") != "result"
+                or envelope.get("subtype") != "success" or envelope.get("is_error") is not False):
+            raise ValueError(envelope.get("result") or envelope.get("errors")
+                             or stderr.strip() or "Claude Code 调用失败")
+        # 解析 Agent 推荐结果
+        suggestion = json.loads(envelope["result"])
+        name, reason = (suggestion[key] for key in ("template", "reason")) # name：模板名，reason：推荐理由
+        if name is not None and (not isinstance(name, str) or name not in {t["name"] for t in templates}):
+            raise ValueError("推荐了候选集合外的模板")
+        if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500:
+            raise ValueError("推荐理由无效")
+        return {"status": "recommended" if name is not None else "uncertain",
+                "template": name, "reason": reason.strip()}
+    except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.TimeoutExpired) as exc:
+        detail = str(exc)
+        for secret in (agent_api_key, os.environ.get("GH_TOKEN", "")):
+            if secret:
+                detail = detail.replace(secret, "[REDACTED]")
+        detail = " ".join(detail.split())[:500] or "未知错误"
+        return {"status": "unavailable", "template": None,
+                "reason": f"模板推荐调用失败：{detail}；基础格式检查结果已保留。"}
+
+
+def _comment_text(value: str) -> str:
+    """将模型文本转为评论中的单行文字，避免产生 HTML、链接或提及。
+
+    Args:
+        value: 已验证的模板名或理由。
+    Returns:
+        转义后的单行评论文字。
+    """
+    value = html.escape(" ".join(value.split()), quote=False).replace("@", "@\u200b")
+    return re.sub(r"([\\`*_{\[\]}()!#>|~])", r"\\\1", value)
 
 
 def format_comment(result: dict[str, Any], repository: str) -> str:
     """将检查结果转换成评论草稿。
     
     Args:
-        result: check_issue 返回的检查结果。
+        result: 格式检查结果，可包含主流程附加的 recommendation。
         repository: 仓库路径，格式为 owner/repo。
     Returns:
         包含隐藏标记、检查结论和格式建议的 Markdown 文本。
     """
     # 撰写检查结果评论
     lines = [MARKER, "### Issue 模板检查", ""]
+    recommendation = result.get("recommendation", {})
     if result["status"] == "pass":
         names = "、".join(result["matched_templates"])
         lines.append(f"基础格式检查通过，匹配模板：{names}。")
     else:
         lines.append("未匹配现有模板的完整格式，请按适合的模板整理。")
-        # 标题已指定模板时，仅展示对应模板的问题；否则列出各模板供作者选择
+        # 部分匹配只展示已选候选的问题；完全无匹配才列出全部模板。
         candidates = [
             check for check in result["checks"]
-            if not any(p["reason"] == "title_prefix" for p in check["problems"])
-        ] or result["checks"]
+            if result["status"] == "no_match"
+            or check["template"] in result["matched_templates"]
+        ]
+        if recommendation.get("status") == "recommended":
+            lines.extend([
+                "", "### 模板推荐",
+                f"建议使用：{_comment_text(recommendation['template'])}。",
+                f"推荐理由：{_comment_text(recommendation['reason'])}",
+            ])
+            # 只给出模板建议，不把全部候选模板的缺项一起要求作者补齐。
+            candidates = []
+        elif recommendation:
+            prefix = "暂无法确定推荐模板。" if recommendation["status"] == "uncertain" else ""
+            lines.extend(["", prefix + _comment_text(recommendation["reason"])])
         for check in candidates:
             lines.extend(["", f"<details><summary>{check['template']}</summary>", ""])
             for problem in check["problems"]:
@@ -187,7 +330,10 @@ def format_comment(result: dict[str, Any], repository: str) -> str:
             lines.extend(["", "</details>"])
         url = f"{GITHUB_WEB_URL}/{repository}/issues/new/choose"
         lines.extend(["", f"[查看可用模板]({url})"])
-    lines.extend(["", "本检查仅验证格式，不判断分类是否正确、信息是否充分或 bug 是否真实。"])
+    if recommendation.get("status") in {"recommended", "uncertain"}:
+        lines.extend(["", "模板推荐仅供参考；格式检查与推荐均不判断信息是否充分或 bug 是否真实。"])
+    else:
+        lines.extend(["", "本检查仅验证格式，不判断分类是否正确、信息是否充分或 bug 是否真实。"])
     return "\n".join(lines)
 
 
@@ -229,7 +375,7 @@ def main() -> None:
     """加载配置，执行功能，输出日志和actions摘要。
     
     Args:
-        无。通过环境变量读取 Token、仓库、Issue 编号、模板目录及发布开关；
+        无。通过环境变量读取平台及模型凭据、模型名、仓库、Issue 编号、模板目录及发布开关；
         POST_COMMENT=true 时发布评论，其他值或未设置时仅预览。
     Returns:
         None。标准输出为 JSON；设置 GITHUB_STEP_SUMMARY 时另写 Markdown 摘要。
@@ -237,6 +383,8 @@ def main() -> None:
     
     # 加载配置
     gh_token = os.environ["GH_TOKEN"]
+    agent_api_key = os.environ.get("AGENT_API_KEY", "")
+    llm_model = os.environ.get("LLM_MODEL") or "glm-5.3"
     repository = os.environ["REPOSITORY"] # owner/repo
     number = os.environ["ISSUE_NUMBER"] # issue 编号
     templates = load_templates(os.environ.get("TEMPLATE_DIR", "../.github/ISSUE_TEMPLATE")) # 待匹配的 issue 模板列表
@@ -256,6 +404,17 @@ def main() -> None:
     # 审查issue
     result = check_issue(issue["title"], issue.get("body") or "", templates)
 
+    # 无法匹配模板时，根据内容推荐模板
+    if result["status"] == "no_match":
+        result["recommendation"] = recommend_template(
+            issue["title"], issue.get("body") or "", templates, agent_api_key, llm_model,
+        )
+    recommendation = result.get("recommendation", {})
+    # agent 调用出错时在 Actions 日志中输出警告
+    if recommendation.get("status") == "unavailable":
+        prefix = "::warning title=Issue Agent::" if os.environ.get("GITHUB_ACTIONS") == "true" else ""
+        print(prefix + recommendation["reason"].replace("%", "%25"), file=sys.stderr)
+
     # 生成评论内容
     body = format_comment(result, repository)
 
@@ -270,7 +429,7 @@ def main() -> None:
             action = update_comment(repository, number, body, gh_token)
     output = {"result": result, "comment_action": action, "comment_body": body}
 
-    # 打印日志；Actions 运行摘要页展示评论草稿
+    # 输出日志；Actions 运行摘要页展示评论草稿
     print(json.dumps(output, ensure_ascii=False))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

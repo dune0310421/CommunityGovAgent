@@ -28,9 +28,9 @@ jobs:
   issue_compliance:
     name: 检查 Issue 模板并反馈
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      # 下载本仓代码和模板到 runner，准备 Python 并安装依赖。
+      # 下载本仓代码和模板到 runner，准备环境并安装依赖。
       - name: 获取检查代码和本仓模板
         uses: actions/checkout@v4
         with:
@@ -41,11 +41,21 @@ jobs:
           python-version: '3.12'
       - name: 安装检查依赖
         run: python -m pip install -r issueGovAgent/requirements.txt
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 安装 Claude Code
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.316
+          claude --version
       # 执行检查并反馈
       - name: 检查并反馈
         working-directory: issueGovAgent
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub 自动提供的工作流令牌，用于读取 Issue 和写评论
+          AGENT_API_KEY: ${{ secrets.GLM_CODING_API_KEY }} # 仅无模板匹配时交给 Claude Code
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'glm-5.3' }}
           REPOSITORY: ${{ github.repository }} # 仓库全名，格式为 owner/repo
           ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
           TEMPLATE_DIR: ../.github/ISSUE_TEMPLATE # 模板已随 checkout 下载，Python 直接读取本地文件
