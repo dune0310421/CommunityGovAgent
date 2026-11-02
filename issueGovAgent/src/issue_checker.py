@@ -375,8 +375,8 @@ def main() -> None:
     """加载配置，执行功能，输出日志和actions摘要。
     
     Args:
-        无。通过环境变量读取平台及模型凭据、模型名、仓库、Issue 编号、模板目录及发布开关；
-        POST_COMMENT=true 时发布评论，其他值或未设置时仅预览。
+        无。通过环境变量读取平台及模型凭据、模型名、仓库、Issue 编号、模板目录；
+        检查后复查 Issue 内容，再发布或更新评论。
     Returns:
         None。标准输出为 JSON；设置 GITHUB_STEP_SUMMARY 时另写 Markdown 摘要。
     """
@@ -388,7 +388,6 @@ def main() -> None:
     repository = os.environ["REPOSITORY"] # owner/repo
     number = os.environ["ISSUE_NUMBER"] # issue 编号
     templates = load_templates(os.environ.get("TEMPLATE_DIR", "../.github/ISSUE_TEMPLATE")) # 待匹配的 issue 模板列表
-    post_comment = os.environ.get("POST_COMMENT", "false").lower() == "true" # 是否发布评论
 
     # 运行功能：执行检查和发布评论
     # 当前处理issue
@@ -418,15 +417,13 @@ def main() -> None:
     # 生成评论内容
     body = format_comment(result, repository)
 
-    # 反馈结果：预览或者发布评论
-    action = "preview"
-    if post_comment:
-        # 发布前再读一次：若作者刚补全正文此时会触发新的workflow，本步骤就跳过不用管了
-        latest = github_request("GET", path, gh_token)
-        if (latest["title"], latest.get("body")) != (issue["title"], issue.get("body")):
-            action = "skipped_changed"
-        else:
-            action = update_comment(repository, number, body, gh_token)
+    # 发布前复查，内容未变化时发布或更新评论。
+    # 发布前再读一次：若作者刚补全正文此时会触发新的workflow，本步骤就跳过不用管了
+    latest = github_request("GET", path, gh_token)
+    if (latest["title"], latest.get("body")) != (issue["title"], issue.get("body")):
+        action = "skipped_changed"
+    else:
+        action = update_comment(repository, number, body, gh_token)
     output = {"result": result, "comment_action": action, "comment_body": body}
 
     # 输出日志；Actions 运行摘要页展示评论草稿

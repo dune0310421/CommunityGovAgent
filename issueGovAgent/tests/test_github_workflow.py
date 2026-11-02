@@ -154,27 +154,27 @@ class MainTests(OfflineTests):
             main()
         return json.loads(stdout.getvalue())
 
-    def test_default_preview_reads_once_and_writes_summary_without_commenting(self):
+    def test_default_publishes_and_writes_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             summary = Path(directory) / "summary.md"
-            with patch("src.issue_checker.github_request", return_value=ISSUE) as api:
+            with patch("src.issue_checker.github_request", side_effect=[ISSUE, ISSUE, [], {}]) as api:
                 output = self.run_main(api, GITHUB_STEP_SUMMARY=str(summary))
             self.assertEqual(output["result"]["status"], "pass")
-            self.assertEqual(output["comment_action"], "preview")
-            api.assert_called_once_with("GET", ISSUE_PATH, TOKEN)
+            self.assertEqual(output["comment_action"], "created")
+            self.assertEqual([c.args[0] for c in api.call_args_list], ["GET", "GET", "GET", "POST"])
             self.assertEqual(summary.read_text(encoding="utf-8"),
-                             f"评论操作：preview\n\n{output['comment_body']}\n")
+                             f"评论操作：created\n\n{output['comment_body']}\n")
 
     def test_publish_lifecycle_creates_updates_then_skips_identical_comment(self):
         invalid = {"title": "未按模板填写", "body": "启动失败"}
         with patch("src.issue_checker.github_request", side_effect=[invalid, invalid, [], {}]) as api:
-            created = self.run_main(api, POST_COMMENT="true")
+            created = self.run_main(api)
         self.assertEqual(created["comment_action"], "created")
         self.assertEqual(created["result"]["status"], "no_match")
         with patch("src.issue_checker.github_request", side_effect=[
             ISSUE, ISSUE, [comment(created["comment_body"])], {},
         ]) as api:
-            updated = self.run_main(api, POST_COMMENT="true")
+            updated = self.run_main(api)
         self.assertEqual(updated["comment_action"], "updated")
         self.assertEqual(updated["result"]["status"], "pass")
         api.assert_called_with("PATCH", "/repos/example/project/issues/comments/99", TOKEN,
@@ -182,7 +182,7 @@ class MainTests(OfflineTests):
         with patch("src.issue_checker.github_request", side_effect=[
             ISSUE, ISSUE, [comment(updated["comment_body"])],
         ]) as api:
-            unchanged = self.run_main(api, POST_COMMENT="true")
+            unchanged = self.run_main(api)
         self.assertEqual(unchanged["comment_action"], "unchanged")
         self.assertEqual([c.args[0] for c in api.call_args_list], ["GET", "GET", "GET"])
 
@@ -191,31 +191,32 @@ class MainTests(OfflineTests):
             with self.subTest(changed=changed), patch(
                 "src.issue_checker.github_request", side_effect=[ISSUE, changed]
             ) as api:
-                output = self.run_main(api, POST_COMMENT="true")
+                output = self.run_main(api)
                 self.assertEqual(output["comment_action"], "skipped_changed")
                 self.assertEqual(api.call_args_list, [call("GET", ISSUE_PATH, TOKEN)] * 2)
 
     def test_null_or_missing_body_reports_missing_sections(self):
         for issue in [{"title": ISSUE["title"], "body": None}, {"title": ISSUE["title"]}]:
             with self.subTest(issue=issue), patch(
-                "src.issue_checker.github_request", return_value=issue
+                "src.issue_checker.github_request", side_effect=[issue, issue, [], {}]
             ) as api:
                 output = self.run_main(api)
                 self.assertEqual(output["result"]["status"], "partial_match")
                 self.assertIn("缺少此必填章节", output["comment_body"])
-                self.assertEqual(api.call_count, 1)
+                self.assertEqual(output["comment_action"], "created")
+                self.assertEqual(api.call_count, 4)
 
     def test_invalid_issue_number_is_rejected_before_request(self):
         for number in ["0", "-1", "abc", "12; echo secret"]:
             with self.subTest(number=number), patch("src.issue_checker.github_request") as api:
                 with self.assertRaises(ValueError):
-                    self.run_main(api, ISSUE_NUMBER=number, POST_COMMENT="true")
+                    self.run_main(api, ISSUE_NUMBER=number)
                 api.assert_not_called()
 
     def test_pull_request_is_rejected_without_commenting(self):
         with patch("src.issue_checker.github_request", return_value={**ISSUE, "pull_request": {}}) as api:
             with self.assertRaises(ValueError):
-                self.run_main(api, POST_COMMENT="true")
+                self.run_main(api)
             api.assert_called_once_with("GET", ISSUE_PATH, TOKEN)
 
     def test_empty_template_directory_does_not_publish(self):
@@ -223,7 +224,7 @@ class MainTests(OfflineTests):
             "src.issue_checker.github_request", return_value=ISSUE
         ) as api:
             with self.assertRaises(ValueError):
-                self.run_main(api, TEMPLATE_DIR=directory, POST_COMMENT="true")
+                self.run_main(api, TEMPLATE_DIR=directory)
             api.assert_called_once_with("GET", ISSUE_PATH, TOKEN)
 
     def test_issue_read_or_recheck_error_does_not_publish(self):
@@ -235,13 +236,13 @@ class MainTests(OfflineTests):
                 "src.issue_checker.github_request", side_effect=responses
             ) as api:
                 with self.assertRaises(HTTPError):
-                    self.run_main(api, POST_COMMENT="true")
+                    self.run_main(api)
                 self.assertEqual(api.call_args_list, [call("GET", ISSUE_PATH, TOKEN)] * len(responses))
 
     def test_main_uses_real_request_adapter_and_posts_generated_body(self):
         responses = [ISSUE, ISSUE, [], {"id": 99}]
         env = {"GH_TOKEN": TOKEN, "REPOSITORY": REPOSITORY, "ISSUE_NUMBER": "12",
-               "TEMPLATE_DIR": str(TEMPLATE_DIR), "POST_COMMENT": "true"}
+               "TEMPLATE_DIR": str(TEMPLATE_DIR)}
         with patch.dict(os.environ, env, clear=True), patch(
             "src.issue_checker.request.urlopen",
             side_effect=[io.BytesIO(json.dumps(value).encode("utf-8")) for value in responses],

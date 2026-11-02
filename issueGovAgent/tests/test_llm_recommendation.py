@@ -223,11 +223,11 @@ class ProcessIntegrationTests(unittest.TestCase):
 
 
 class RoutingTests(unittest.TestCase):
-    def run_agent(self, title, body, recommendation=RECOMMENDATION, publish=False, latest=None):
+    def run_agent(self, title, body, recommendation=RECOMMENDATION, latest=None):
         issue = {"title": title, "body": body}
-        responses = [issue] if not publish else [issue, latest or issue, [], {}]
+        responses = [issue, latest or issue, [], {}]
         env = {"GH_TOKEN": "github-test-key", "REPOSITORY": "example/project", "ISSUE_NUMBER": "12",
-               "AGENT_API_KEY": "model-test-key", "LLM_MODEL": "glm-test", "POST_COMMENT": str(publish)}
+               "AGENT_API_KEY": "model-test-key", "LLM_MODEL": "glm-test"}
         with patch.dict(os.environ, env, clear=True), patch(
             "src.issue_checker.load_templates", return_value=copy.deepcopy(TEMPLATES),
         ), patch("src.issue_checker.github_request", side_effect=responses) as github, patch(
@@ -240,7 +240,7 @@ class RoutingTests(unittest.TestCase):
         issue = {"title": TITLE, "body": BODY}
         responses = [issue, issue, [], {"id": 99}]
         env = {"GH_TOKEN": "github-test-key", "REPOSITORY": "example/project", "ISSUE_NUMBER": "12",
-               "AGENT_API_KEY": "model-test-key", "POST_COMMENT": "true"}
+               "AGENT_API_KEY": "model-test-key"}
         with patch.dict(os.environ, env, clear=True), patch(
             "src.issue_checker.load_templates", return_value=TEMPLATES,
         ), patch("src.issue_checker.request.urlopen", side_effect=[
@@ -273,7 +273,9 @@ class RoutingTests(unittest.TestCase):
                    "GITHUB_STEP_SUMMARY": str(summary)}
             with patch.dict(os.environ, env, clear=True), patch(
                 "src.issue_checker.load_templates", return_value=TEMPLATES,
-            ), patch("src.issue_checker.github_request", return_value={"title": TITLE, "body": BODY}), patch(
+            ), patch("src.issue_checker.github_request", side_effect=[
+                {"title": TITLE, "body": BODY}, {"title": TITLE, "body": BODY}, [], {},
+            ]), patch(
                 "src.issue_checker.subprocess.Popen"
             ) as spawn, patch("src.issue_checker.os.killpg"), contextlib.redirect_stdout(
                 io.StringIO()
@@ -328,7 +330,7 @@ class RoutingTests(unittest.TestCase):
                 llm.assert_called_once()
 
     def test_no_match_calls_once_and_publishes_recommendation_without_passing_format(self):
-        output, llm, github = self.run_agent(TITLE, BODY, publish=True)
+        output, llm, github = self.run_agent(TITLE, BODY)
         llm.assert_called_once_with(TITLE, BODY, TEMPLATES, "model-test-key", "glm-test")
         result = output["result"]
         self.assertEqual(result["status"], "no_match")
@@ -353,7 +355,7 @@ class RoutingTests(unittest.TestCase):
                 self.assertNotIn("建议使用：", output["comment_body"])
 
     def test_edit_during_model_call_prevents_stale_comment(self):
-        output, llm, github = self.run_agent(TITLE, BODY, publish=True,
+        output, llm, github = self.run_agent(TITLE, BODY,
                                            latest={"title": TITLE, "body": "已修改"})
         llm.assert_called_once()
         self.assertEqual(output["comment_action"], "skipped_changed")

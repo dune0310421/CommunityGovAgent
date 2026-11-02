@@ -9,11 +9,7 @@ on:
         description: 本仓库的 Issue 编号
         required: true
         type: string
-      post_comment:
-        description: 是否发布或更新检查结果评论
-        required: true
-        default: false
-        type: boolean
+
 
 permissions:
   contents: read
@@ -59,5 +55,4 @@ jobs:
           REPOSITORY: ${{ github.repository }} # 仓库全名，格式为 owner/repo
           ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
           TEMPLATE_DIR: ../.github/ISSUE_TEMPLATE # 模板已随 checkout 下载，Python 直接读取本地文件
-          POST_COMMENT: ${{ github.event_name == 'issues' || inputs.post_comment }} # 自动触发会发布评论；手动触发默认仅预览，勾选后才发布
         run: python src/issue_checker.py
