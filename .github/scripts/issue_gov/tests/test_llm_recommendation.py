@@ -12,7 +12,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from src.issue_checker import (
+from issue_checker import (
     LLM_BASE_URL, LLM_TIMEOUT, MARKER, check_issue, format_comment, main, recommend_template,
 )
 
@@ -42,7 +42,7 @@ def model_response(suggestion=SUGGESTION):
 class RecommendationTests(unittest.TestCase):
     def setUp(self):
         for name in ["request.urlopen", "subprocess.Popen", "os.killpg"]:
-            guard = patch("src.issue_checker." + name)
+            guard = patch("issue_checker." + name)
             mock = guard.start()
             self.addCleanup(guard.stop)
             setattr(self, name.split(".")[-1], mock)
@@ -212,7 +212,7 @@ class ProcessIntegrationTests(unittest.TestCase):
                 "Path(" + repr(str(pid_file)) + ").write_text(str(os.getpid())+' '+str(p.pid))\n"
                 "time.sleep(30)\n")
             binary.chmod(0o755)
-            with patch.dict(os.environ, {"PATH": directory}), patch("src.issue_checker.LLM_TIMEOUT", 1):
+            with patch.dict(os.environ, {"PATH": directory}), patch("issue_checker.LLM_TIMEOUT", 1):
                 result = recommend_template(TITLE, BODY, TEMPLATES, "test-key")
             self.assertEqual(result["status"], "unavailable")
             self.assertTrue(pid_file.exists())
@@ -229,9 +229,9 @@ class RoutingTests(unittest.TestCase):
         env = {"GH_TOKEN": "github-test-key", "REPOSITORY": "example/project", "ISSUE_NUMBER": "12",
                "AGENT_API_KEY": "model-test-key", "LLM_MODEL": "glm-test"}
         with patch.dict(os.environ, env, clear=True), patch(
-            "src.issue_checker.load_templates", return_value=copy.deepcopy(TEMPLATES),
-        ), patch("src.issue_checker.github_request", side_effect=responses) as github, patch(
-            "src.issue_checker.recommend_template", return_value=recommendation,
+            "issue_checker.load_templates", return_value=copy.deepcopy(TEMPLATES),
+        ), patch("issue_checker.github_request", side_effect=responses) as github, patch(
+            "issue_checker.recommend_template", return_value=recommendation,
         ) as llm, contextlib.redirect_stdout(io.StringIO()) as stdout:
             main()
         return json.loads(stdout.getvalue()), llm, github
@@ -242,11 +242,11 @@ class RoutingTests(unittest.TestCase):
         env = {"GH_TOKEN": "github-test-key", "REPOSITORY": "example/project", "ISSUE_NUMBER": "12",
                "AGENT_API_KEY": "model-test-key"}
         with patch.dict(os.environ, env, clear=True), patch(
-            "src.issue_checker.load_templates", return_value=TEMPLATES,
-        ), patch("src.issue_checker.request.urlopen", side_effect=[
+            "issue_checker.load_templates", return_value=TEMPLATES,
+        ), patch("issue_checker.request.urlopen", side_effect=[
             io.BytesIO(json.dumps(value).encode("utf-8")) for value in responses
-        ]) as http, patch("src.issue_checker.subprocess.Popen") as spawn, patch(
-            "src.issue_checker.os.killpg"
+        ]) as http, patch("issue_checker.subprocess.Popen") as spawn, patch(
+            "issue_checker.os.killpg"
         ), contextlib.redirect_stdout(io.StringIO()) as stdout:
             process = spawn.return_value.__enter__.return_value
             process.returncode = 0
@@ -272,12 +272,12 @@ class RoutingTests(unittest.TestCase):
                    "AGENT_API_KEY": "model-test-key", "GITHUB_ACTIONS": "true",
                    "GITHUB_STEP_SUMMARY": str(summary)}
             with patch.dict(os.environ, env, clear=True), patch(
-                "src.issue_checker.load_templates", return_value=TEMPLATES,
-            ), patch("src.issue_checker.github_request", side_effect=[
+                "issue_checker.load_templates", return_value=TEMPLATES,
+            ), patch("issue_checker.github_request", side_effect=[
                 {"title": TITLE, "body": BODY}, {"title": TITLE, "body": BODY}, [], {},
             ]), patch(
-                "src.issue_checker.subprocess.Popen"
-            ) as spawn, patch("src.issue_checker.os.killpg"), contextlib.redirect_stdout(
+                "issue_checker.subprocess.Popen"
+            ) as spawn, patch("issue_checker.os.killpg"), contextlib.redirect_stdout(
                 io.StringIO()
             ) as stdout, contextlib.redirect_stderr(io.StringIO()) as stderr:
                 process = spawn.return_value.__enter__.return_value

@@ -21,7 +21,7 @@ GITHUB_WEB_URL = "https://github.com"
 GITHUB_API_URL = "https://api.github.com"
 LLM_BASE_URL = "https://open.bigmodel.cn/api/anthropic"
 LLM_TIMEOUT = 120
-RECOMMEND_PROMPT = Path(__file__).resolve().parents[1] / "prompts/recommend_template.md"
+RECOMMEND_PROMPT = Path(__file__).resolve().with_name("recommend_template.md")
 
 
 def load_templates(directory: str | Path) -> list[dict[str, Any]]:
@@ -387,7 +387,7 @@ def main() -> None:
     llm_model = os.environ.get("LLM_MODEL") or "glm-5.3"
     repository = os.environ["REPOSITORY"] # owner/repo
     number = os.environ["ISSUE_NUMBER"] # issue 编号
-    templates = load_templates(os.environ.get("TEMPLATE_DIR", "../.github/ISSUE_TEMPLATE")) # 待匹配的 issue 模板列表
+    templates = load_templates(os.environ.get("TEMPLATE_DIR") or Path(__file__).resolve().parents[2] / "ISSUE_TEMPLATE") # 待匹配的 issue 模板列表
 
     # 运行功能：执行检查和发布评论
     # 当前处理issue

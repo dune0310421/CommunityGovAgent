@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.issue_checker import _fields, _sections, check_issue, load_templates
+from issue_checker import _fields, _sections, check_issue, load_templates
 
 
-TEMPLATE_DIR = Path(__file__).resolve().parents[2] / ".github/ISSUE_TEMPLATE"
+TEMPLATE_DIR = Path(__file__).resolve().parents[3] / "ISSUE_TEMPLATE"
 
 
 def template(name="缺陷", prefix="[Bug]: "):

@@ -10,14 +10,14 @@ from pathlib import Path
 from unittest.mock import call, patch
 from urllib.error import HTTPError, URLError
 
-from src.issue_checker import BOT_LOGIN, MARKER, github_request, main, update_comment
+from issue_checker import BOT_LOGIN, MARKER, github_request, main, update_comment
 
 
 TOKEN = "test-token"
 REPOSITORY = "example/project"
 ISSUE_PATH = "/repos/example/project/issues/12"
 COMMENTS_PATH = ISSUE_PATH + "/comments"
-TEMPLATE_DIR = Path(__file__).resolve().parents[2] / ".github/ISSUE_TEMPLATE"
+TEMPLATE_DIR = Path(__file__).resolve().parents[3] / "ISSUE_TEMPLATE"
 ISSUE = {"title": "[Question|问题咨询]: 如何构建？",
          "body": "### Describe the question / 问题描述 (Mandatory / 必填)\n如何构建？"}
 
@@ -29,7 +29,7 @@ def comment(body=MARKER + "\n旧结果", login=BOT_LOGIN, kind="Bot", identifier
 class OfflineTests(unittest.TestCase):
     def setUp(self):
         # 未显式模拟的网络调用直接失败，避免测试意外访问真实平台。
-        guard = patch("src.issue_checker.request.urlopen",
+        guard = patch("issue_checker.request.urlopen",
                       side_effect=AssertionError("测试不允许真实网络请求"))
         guard.start()
         self.addCleanup(guard.stop)
@@ -44,7 +44,7 @@ class GitHubRequestTests(OfflineTests):
         ]:
             with self.subTest(method=method), patch.dict(
                 os.environ, {"GH_TOKEN": "different-environment-token"}, clear=True
-            ), patch("src.issue_checker.request.urlopen", return_value=io.BytesIO(
+            ), patch("issue_checker.request.urlopen", return_value=io.BytesIO(
                 json.dumps(response).encode("utf-8")
             )) as http:
                 result = github_request(method, "/repos/example/project/issues/12", TOKEN, payload)
@@ -62,14 +62,14 @@ class GitHubRequestTests(OfflineTests):
             self.assertGreater(http.call_args.kwargs["timeout"], 0)
 
     def test_request_errors_propagate(self):
-        with patch("src.issue_checker.request.urlopen", side_effect=URLError("offline")):
+        with patch("issue_checker.request.urlopen", side_effect=URLError("offline")):
             with self.assertRaises(URLError):
                 github_request("GET", ISSUE_PATH, TOKEN)
 
 
 class UpdateCommentTests(OfflineTests):
     def update(self, responses, body=MARKER + "\n新结果"):
-        with patch("src.issue_checker.github_request", side_effect=responses) as api:
+        with patch("issue_checker.github_request", side_effect=responses) as api:
             action = update_comment(REPOSITORY, 12, body, TOKEN)
         return action, api
 
@@ -136,7 +136,7 @@ class UpdateCommentTests(OfflineTests):
         for responses, methods in [([URLError("read failed")], ["GET"]),
                                    ([[comment()], URLError("patch failed")], ["GET", "PATCH"])]:
             with self.subTest(methods=methods), patch(
-                "src.issue_checker.github_request", side_effect=responses
+                "issue_checker.github_request", side_effect=responses
             ) as api:
                 with self.assertRaises(URLError):
                     update_comment(REPOSITORY, 12, MARKER + "\n新结果", TOKEN)
@@ -149,7 +149,7 @@ class MainTests(OfflineTests):
                "TEMPLATE_DIR": str(TEMPLATE_DIR)}
         env.update(overrides)
         with patch.dict(os.environ, env, clear=True), patch(
-            "src.issue_checker.github_request", api,
+            "issue_checker.github_request", api,
         ), contextlib.redirect_stdout(io.StringIO()) as stdout:
             main()
         return json.loads(stdout.getvalue())
@@ -157,7 +157,7 @@ class MainTests(OfflineTests):
     def test_default_publishes_and_writes_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             summary = Path(directory) / "summary.md"
-            with patch("src.issue_checker.github_request", side_effect=[ISSUE, ISSUE, [], {}]) as api:
+            with patch("issue_checker.github_request", side_effect=[ISSUE, ISSUE, [], {}]) as api:
                 output = self.run_main(api, GITHUB_STEP_SUMMARY=str(summary))
             self.assertEqual(output["result"]["status"], "pass")
             self.assertEqual(output["comment_action"], "created")
@@ -167,11 +167,11 @@ class MainTests(OfflineTests):
 
     def test_publish_lifecycle_creates_updates_then_skips_identical_comment(self):
         invalid = {"title": "未按模板填写", "body": "启动失败"}
-        with patch("src.issue_checker.github_request", side_effect=[invalid, invalid, [], {}]) as api:
+        with patch("issue_checker.github_request", side_effect=[invalid, invalid, [], {}]) as api:
             created = self.run_main(api)
         self.assertEqual(created["comment_action"], "created")
         self.assertEqual(created["result"]["status"], "no_match")
-        with patch("src.issue_checker.github_request", side_effect=[
+        with patch("issue_checker.github_request", side_effect=[
             ISSUE, ISSUE, [comment(created["comment_body"])], {},
         ]) as api:
             updated = self.run_main(api)
@@ -179,7 +179,7 @@ class MainTests(OfflineTests):
         self.assertEqual(updated["result"]["status"], "pass")
         api.assert_called_with("PATCH", "/repos/example/project/issues/comments/99", TOKEN,
                                {"body": updated["comment_body"]})
-        with patch("src.issue_checker.github_request", side_effect=[
+        with patch("issue_checker.github_request", side_effect=[
             ISSUE, ISSUE, [comment(updated["comment_body"])],
         ]) as api:
             unchanged = self.run_main(api)
@@ -189,7 +189,7 @@ class MainTests(OfflineTests):
     def test_title_or_body_change_skips_all_comment_requests(self):
         for changed in [{**ISSUE, "title": "新标题"}, {**ISSUE, "body": "新正文"}]:
             with self.subTest(changed=changed), patch(
-                "src.issue_checker.github_request", side_effect=[ISSUE, changed]
+                "issue_checker.github_request", side_effect=[ISSUE, changed]
             ) as api:
                 output = self.run_main(api)
                 self.assertEqual(output["comment_action"], "skipped_changed")
@@ -198,7 +198,7 @@ class MainTests(OfflineTests):
     def test_null_or_missing_body_reports_missing_sections(self):
         for issue in [{"title": ISSUE["title"], "body": None}, {"title": ISSUE["title"]}]:
             with self.subTest(issue=issue), patch(
-                "src.issue_checker.github_request", side_effect=[issue, issue, [], {}]
+                "issue_checker.github_request", side_effect=[issue, issue, [], {}]
             ) as api:
                 output = self.run_main(api)
                 self.assertEqual(output["result"]["status"], "partial_match")
@@ -208,20 +208,20 @@ class MainTests(OfflineTests):
 
     def test_invalid_issue_number_is_rejected_before_request(self):
         for number in ["0", "-1", "abc", "12; echo secret"]:
-            with self.subTest(number=number), patch("src.issue_checker.github_request") as api:
+            with self.subTest(number=number), patch("issue_checker.github_request") as api:
                 with self.assertRaises(ValueError):
                     self.run_main(api, ISSUE_NUMBER=number)
                 api.assert_not_called()
 
     def test_pull_request_is_rejected_without_commenting(self):
-        with patch("src.issue_checker.github_request", return_value={**ISSUE, "pull_request": {}}) as api:
+        with patch("issue_checker.github_request", return_value={**ISSUE, "pull_request": {}}) as api:
             with self.assertRaises(ValueError):
                 self.run_main(api)
             api.assert_called_once_with("GET", ISSUE_PATH, TOKEN)
 
     def test_empty_template_directory_does_not_publish(self):
         with tempfile.TemporaryDirectory() as directory, patch(
-            "src.issue_checker.github_request", return_value=ISSUE
+            "issue_checker.github_request", return_value=ISSUE
         ) as api:
             with self.assertRaises(ValueError):
                 self.run_main(api, TEMPLATE_DIR=directory)
@@ -233,7 +233,7 @@ class MainTests(OfflineTests):
             self.addCleanup(failure.close)
             responses = [ISSUE, failure] if fail_on_recheck else [failure]
             with self.subTest(recheck=fail_on_recheck), patch(
-                "src.issue_checker.github_request", side_effect=responses
+                "issue_checker.github_request", side_effect=responses
             ) as api:
                 with self.assertRaises(HTTPError):
                     self.run_main(api)
@@ -244,7 +244,7 @@ class MainTests(OfflineTests):
         env = {"GH_TOKEN": TOKEN, "REPOSITORY": REPOSITORY, "ISSUE_NUMBER": "12",
                "TEMPLATE_DIR": str(TEMPLATE_DIR)}
         with patch.dict(os.environ, env, clear=True), patch(
-            "src.issue_checker.request.urlopen",
+            "issue_checker.request.urlopen",
             side_effect=[io.BytesIO(json.dumps(value).encode("utf-8")) for value in responses],
         ) as http, contextlib.redirect_stdout(io.StringIO()) as stdout:
             main()

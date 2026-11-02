@@ -2,7 +2,7 @@
 
 import unittest
 
-from src.issue_checker import MARKER, check_issue, format_comment
+from issue_checker import MARKER, check_issue, format_comment
 
 
 def check(name, *reasons):

@@ -48,8 +48,8 @@ flowchart LR
 | 文件 | 职责 |
 | --- | --- |
 | `.github/workflows/issue-compliance.yml` | 配置触发事件、权限、并发组和参数；安装固定版本 Claude Code 并注入团队 Key |
-| `issueGovAgent/prompts/recommend_template.md` | 模板推荐提示词与输出要求 |
-| `issueGovAgent/src/issue_checker.py` | 模板加载、格式检查、推荐模板、GitHub 请求及评论；通过 CLI 子进程调用 Agent |
+| `.github/scripts/issue_gov/recommend_template.md` | 模板推荐提示词与输出要求 |
+| `.github/scripts/issue_gov/issue_checker.py` | 模板加载、格式检查、推荐模板、GitHub 请求及评论；通过 CLI 子进程调用 Agent |
 
 ### 3.1 模板匹配检查
 
@@ -105,7 +105,7 @@ flowchart LR
 调用过程：
 
 - 启动 `claude -p`，默认模型为 `glm-5.3`，禁用工具调用。
-- 通过 `--system-prompt` 传入 `issueGovAgent/prompts/recommend_template.md` 的内容；Issue 标题、正文和候选模板以 JSON 写入标准输入。
+- 通过 `--system-prompt` 传入 `.github/scripts/issue_gov/recommend_template.md` 的内容；Issue 标题、正文和候选模板以 JSON 写入标准输入。
 - 使用临时工作和配置目录，最多 3 轮、总超时 120 秒；结束后清理进程和目录。
 
 程序读取 CLI 的 `result`，校验模板名属于候选集合或为 `null`、理由为 1～500 字符。推荐结果存入 `result.recommendation`，不改变格式检查结果：
@@ -176,16 +176,16 @@ Workflow 在同一 job 中获取代码，准备 Python、Node.js 22，安装 Pyt
 | `LLM_MODEL` | 模型名；默认 `glm-5.3` |
 | `REPOSITORY` | 当前仓库，格式为 `owner/repo` |
 | `ISSUE_NUMBER` | 正整数 Issue 编号，不接受 Pull Request |
-| `TEMPLATE_DIR` | 本地模板目录；相对于模块工作目录默认为 `../.github/ISSUE_TEMPLATE` |
+| `TEMPLATE_DIR` | 本地模板目录；默认定位仓库的 `.github/ISSUE_TEMPLATE`，显式相对路径以当前工作目录为基准 |
 | `GITHUB_STEP_SUMMARY` | Actions 提供的摘要文件路径；未设置时只输出日志 |
 
 ### 4.2 平台适配
 
-`check_issue()` 不依赖平台或 Token，可以复用；`main()` 串联了 GitHub 专用操作。接入 AtomGit 时，需要适配工作流事件、认证、API 路径与响应、机器人身份、模板路径及网页链接。若选择由 AtomGit 调用外部服务，还需新增 HTTP 入口；可复用的是检查逻辑。
+AtomGit 版本位于 `.gitcode/scripts/issue_gov/`，工作流位于 `.gitcode/workflows/`，见 [AtomGit 使用说明](../../../.gitcode/scripts/issue_gov/README.md)。WebHook 接收服务暂保留在 `issueGovAgent/atomGit/`，见 [服务部署说明](../../../issueGovAgent/atomGit/README.md)。
 
 ## 5. 测试
 
-在 `issueGovAgent/` 目录执行：
+在 `.github/scripts/issue_gov/` 目录执行：
 
 ```bash
 python3 -m unittest discover -s tests -v
