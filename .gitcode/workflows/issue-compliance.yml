@@ -1,0 +1,60 @@
+name: Issue 规范性检测
+
+on:
+  issues:
+    types: 
+      - open
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 本仓库的 Issue 编号
+        required: true
+        type: string
+
+
+permissions:
+  repository: read
+  project: read
+  issue: write
+  note: write
+  pr: none
+  action: none
+
+concurrency:
+  enable: true
+  max: 1
+  exceed-action: QUEUE
+  preemption:
+    enable: false
+
+jobs:
+  issue_compliance:
+    name: 检查 Issue 模板并反馈
+    runs-on: [ubuntu-latest, x64, small]
+    timeout-minutes: 10
+    steps:
+      - name: 获取检查代码和本仓模板
+        uses: checkout
+      - name: 准备 Python
+        uses: setup-python
+        with:
+          python-version: '3.12'
+      - name: 安装检查依赖
+        run: python -m pip install -r .gitcode/scripts/issue_gov/requirements.txt
+      - name: 准备 Node.js
+        uses: setup-node
+        with:
+          node-version: '22'
+      - name: 安装 Claude Code
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.316
+          claude --version
+      - name: 检查并反馈
+        env:
+          ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
+          AGENT_API_KEY: ${{ secrets.GLM_CODING_API_KEY }} # 需要用到的 Agent 密钥
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'glm-5.3' }}
+          REPOSITORY: ${{ atomgit.repository }} # 仓库全名，格式为 owner/repo
+          ISSUE_NUMBER: ${{ atomgit.event.issue.number || inputs.issue_number }}
+          TEMPLATE_DIR: .gitcode/ISSUE_TEMPLATE # 模板已随 checkout 下载，Python 直接读取本地文件
+        run: python .gitcode/scripts/issue_gov/issue_checker.py
