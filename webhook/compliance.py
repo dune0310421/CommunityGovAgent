@@ -17,7 +17,7 @@ import yaml
 
 from errors import IssueProcessingError
 
-LLM_TIMEOUT = 120
+LLM_TIMEOUT = 180
 RECOMMEND_PROMPT = Path(__file__).resolve().with_name("recommend_template.md")
 
 
@@ -673,7 +673,13 @@ def recommend_template(
             raise ValueError(envelope.get("result") or envelope.get("errors")
                              or stderr.strip() or "Claude Code 调用失败")
         # 解析 Agent 推荐结果
-        suggestion = json.loads(envelope["result"])
+        response = envelope["result"]
+        if isinstance(response, str):
+            # 模型可能给整个 JSON 加上 Markdown 围栏；只去掉这一层包装。
+            fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", response.strip(), re.DOTALL | re.IGNORECASE)
+            if fenced:
+                response = fenced[1]
+        suggestion = json.loads(response)
         if not isinstance(suggestion, dict):
             raise ValueError("推荐结果格式无效")
         status = suggestion["status"]
@@ -706,17 +712,14 @@ def recommend_template(
             problems = suggestion["problems"]
             if not isinstance(problems, list) or not problems:
                 raise ValueError("需要修改时须提供具体问题")
-            selected = next(t for t in candidates if t["name"] == name)
-            labels = {field["label"] for field in selected["fields"]}
             # 逐条检查问题格式
             for problem in problems:
                 if not isinstance(problem, dict):
                     raise ValueError("问题格式无效")
                 if problem["reason"] not in {"title_prefix", "body"}:
                     raise ValueError("问题类型无效")
-                allowed_fields = {"title"} if problem["reason"] == "title_prefix" else labels
-                if problem["field"] not in allowed_fields:
-                    raise ValueError("问题字段不属于所选模板")
+                if not isinstance(problem["field"], str) or not problem["field"].strip():
+                    raise ValueError("问题字段说明无效")
                 if not isinstance(problem["message"], str) or not 1 <= len(problem["message"].strip()) <= 200:
                     raise ValueError("问题说明无效")
             result["problems"] = problems

@@ -171,11 +171,67 @@ class SemanticReviewTests(unittest.TestCase):
         self.assertIn("### 文档链接（必填）", candidates[1]["markdown_body"])
         self.assertTrue(candidates[1]["fields"][0]["required"])
 
+    def test_single_json_fence_is_accepted_without_relaxing_field_validation(self):
+        decision = {**PASS, "status": "needs_changes", "problems": [
+            {"field": "问题描述", "reason": "body", "message": "请补充问题描述"}]}
+        for fence in ("```json", "```", "```JSON"):
+            with self.subTest(fence=fence):
+                self.respond(decision)
+                envelope = json.loads(self.process.communicate.return_value[0])
+                envelope["result"] = f"  {fence}\n{envelope['result']}\n```\n"
+                self.process.communicate.return_value = (json.dumps(envelope), "")
+                result = self.analyze("[Bug] 启动失败", "")
+                self.assertEqual(result["summary"]["recommendation_status"], "needs_changes")
+                self.assertIn("请补充问题描述", result["comment"])
+
+        self.respond({**decision, "problems": [{"field": None, "reason": "body", "message": "补充字段"}]})
+        envelope = json.loads(self.process.communicate.return_value[0])
+        envelope["result"] = f"```json\n{envelope['result']}\n```"
+        self.process.communicate.return_value = (json.dumps(envelope), "")
+        with self.assertRaises(IssueProcessingError):
+            self.analyze("[Bug] 启动失败", "")
+
+    def test_fenced_json_with_extra_prose_or_multiple_objects_is_rejected(self):
+        raw = json.dumps(PASS)
+        for content in (f"结果如下：\n```json\n{raw}\n```",
+                        f"```json\n{raw}\n```\n以上为结果",
+                        f"```json\n{raw}\n{raw}\n```",
+                        f"```json\n{raw}\n```\n```json\n{raw}\n```"):
+            with self.subTest(content=content):
+                self.respond(PASS)
+                envelope = json.loads(self.process.communicate.return_value[0])
+                envelope["result"] = content
+                self.process.communicate.return_value = (json.dumps(envelope), "")
+                with self.assertRaises(IssueProcessingError):
+                    self.analyze("【缺陷】启动失败", BODY)
+
+    def test_display_field_names_need_not_match_template_labels(self):
+        template = {"name": "缺陷反馈", "title": "[Bug] ", "body": [
+            {"type": "textarea", "attributes": {
+                "label": "Related log / screenshot / 日志 / 截图 (Mandatory / 必填)"},
+             "validations": {"required": True}}]}
+        for field in ("Related log / screenshot / 日志 / 截图", "日志 / 截图"):
+            with self.subTest(field=field):
+                self.respond({**PASS, "status": "needs_changes", "problems": [
+                    {"field": field, "reason": "body", "message": "请补充日志或截图"}]})
+                result = self.analyze("[Bug] 启动失败", "", templates=[template_file(template)])
+                self.assertIn(field + "：请补充日志或截图", result["comment"])
+                self.assertIn(template["body"][0]["attributes"]["label"], result["comment"])
+                self.assertNotIn("**模板标题**", result["comment"])
+
+        self.respond({**PASS, "status": "needs_changes", "problems": [
+            {"field": "标题", "reason": "title_prefix", "message": "请补充缺陷类型标识"}]})
+        result = self.analyze("启动失败", BODY)
+        self.assertIn("标题：请补充缺陷类型标识", result["comment"])
+        self.assertIn("**模板标题**", result["comment"])
+        self.assertNotIn("**模板正文（Markdown）**", result["comment"])
+
     def test_invalid_review_problems_retry_without_publishing(self):
         problem = {"field": "问题描述", "reason": "body", "message": "请补充问题描述"}
-        cases = [None, [], ["问题"], [{}], [{**problem, "field": "不存在的字段"}],
+        cases = [None, [], ["问题"], [{}],
+                 *[[{**problem, "field": value}] for value in (None, 123, [], "", "  ")],
                  [{**problem, "reason": "猜测"}], [{**problem, "reason": "missing_section"}], [{**problem, "message": ""}],
-                 [{**problem, "reason": "title_prefix"}]]
+                 [{**problem, "message": None}]]
         for problems in cases:
             with self.subTest(problems=problems):
                 self.respond({**PASS, "status": "needs_changes", "problems": problems})

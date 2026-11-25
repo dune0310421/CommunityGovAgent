@@ -81,36 +81,27 @@
 
 ## 输出格式
 
-### 基础字段
-
-只输出一个 JSON 对象，不加代码围栏或其他文字：
+只返回一个 JSON 对象，不要添加 Markdown 代码围栏或其他文字。字段如下：
 
 ```json
 {
-  "status": "pass | needs_changes | recommended | not_applicable | insufficient_info 五者之一",
-  "template": "所选模板完整名称，没有适用模板或信息不足时为 null",
-  "reason": "结合当前 Issue 的具体判断依据，1～200 字符",
-  "maintainer": "仅 not_applicable 时填写建议新增模板的用途和需要收集的信息，1～200 字符；其他状态返回 null"
+  "status": "检查结论",
+  "template": "所选模板原名",
+  "reason": "判断依据，1～200 字符",
+  "maintainer": null,
+  "problems": [
+    {
+      "field": "有问题的字段名称或位置",
+      "reason": "body",
+      "message": "具体问题和修改建议，1～200 字符"
+    }
+  ]
 }
 ```
 
-### `problems` 字段
+- status 只能是 pass、needs_changes、recommended、not_applicable、insufficient_info。
+- template：前三种状态填写所选模板原名，后两种为 null。
+- maintainer：仅 not_applicable 时填写新增模板的用途和需要收集的信息，1～200 字符；其他状态为 null。
+- problems：仅 needs_changes 时填写非空数组，其他状态为 null。标题问题的 reason="title_prefix"，正文问题的 reason="body"。field 用于评论展示，清楚指出有问题的字段或位置即可，可使用易懂的简称，无需与模板 label 逐字一致。message 说明实际需要修改的内容，不把已认可的等价表达列为问题。
 
-仅 needs_changes 时增加非空 problems 数组，每项格式如下：
-
-```json
-{
-  "field": "模板中的原始字段 label；Issue 标题问题用 title",
-  "reason": "标题问题为 title_prefix；正文问题统一为 body",
-  "message": "具体缺少什么或如何修改，1～200 字符"
-}
-```
-
-#### 问题位置
-
-reason 仅用于区分评论需要展示模板标题还是正文：
-
-- `title_prefix`：Issue 标题问题。
-- `body`：正文问题，包括字段缺失、内容为空、选项或勾选不符合要求、结构不清等；具体问题直接写在 message 中，不再分类。
-
-title_prefix 的 field 必须为 title，body 的 field 必须原样取自所选模板的 fields.label。每个问题都要对应原文中的实际缺项，不能因字面不完全一致而报错。
+JSON 中每个对象的同名键只能出现一次。problems 数组内的 field、reason、message 均须为非空字符串，不得为 null；其他状态的 null 写在顶层 problems 上。字符串须使用成对的双引号，内容中的双引号、换行等须按 JSON 规则转义。输出前检查 JSON 语法及上述字段约束。
