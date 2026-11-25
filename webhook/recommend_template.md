@@ -102,6 +102,6 @@
 - status 只能是 pass、needs_changes、recommended、not_applicable、insufficient_info。
 - template：前三种状态填写所选模板原名，后两种为 null。
 - maintainer：仅 not_applicable 时填写新增模板的用途和需要收集的信息，1～200 字符；其他状态为 null。
-- problems：仅 needs_changes 时填写非空数组，其他状态为 null。标题问题的 reason="title_prefix"，正文问题的 reason="body"。field 用于评论展示，清楚指出有问题的字段或位置即可，可使用易懂的简称，无需与模板 label 逐字一致。message 说明实际需要修改的内容，不把已认可的等价表达列为问题。
+- problems：仅 needs_changes 时填写非空数组，其他状态为 null。标题问题用 field="title"、reason="title_prefix"；正文问题用模板原始字段 label、reason="body"。message 说明实际需要修改的内容，不把已认可的等价表达列为问题。
 
 JSON 中每个对象的同名键只能出现一次。problems 数组内的 field、reason、message 均须为非空字符串，不得为 null；其他状态的 null 写在顶层 problems 上。字符串须使用成对的双引号，内容中的双引号、换行等须按 JSON 规则转义。输出前检查 JSON 语法及上述字段约束。
