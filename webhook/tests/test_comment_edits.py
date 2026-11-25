@@ -57,7 +57,7 @@ class CommentEditTests(unittest.TestCase):
         self.issue['body'] = f'正文 {seconds} {outcome}'
         self.issue['updated_at'] = (datetime(2026, 11, 17, tzinfo=timezone.utc) + timedelta(seconds=seconds)).isoformat()
         self.analyze.return_value = {
-            'summary': {'status': 'partial_match' if outcome == 'fail' else 'pass' if outcome == 'pass' else 'no_match',
+            'summary': {'status': 'pass' if outcome == 'pass' else 'no_match',
                         'recommendation_status': 'not_applicable' if outcome == 'gap' else None},
             'publish_comment': outcome == 'fail', 'comment': f'检查结果 {seconds} {outcome}',
             'maintainer_suggestion': {'reason': '现有模板不足', 'suggestion': '建议补充适用模板', 'mtr': '["alice"]'}
@@ -146,7 +146,10 @@ class CommentEditTests(unittest.TestCase):
         with patch.object(worker, 'analyze_issue', wraps=analysis.analyze_issue), patch.object(
                 self.client, 'templates', return_value=files):
             self.issue.update(title='[Bug] 失败', body='缺少问题章节')
-            self.assertEqual(self.process()['comment_action'], 'created')
+            with patch.object(compliance, 'recommend_template', return_value={
+                    'status': 'needs_changes', 'template': '缺陷反馈', 'reason': '缺陷模板适用',
+                    'problems': [{'field': '问题', 'reason': 'body', 'message': '请补充问题章节'}]}):
+                self.assertEqual(self.process()['comment_action'], 'created')
             self.assertIn('提交内容规范性检查：未通过', self.comments[1]['body'])
             self.edit(100, 'pass')
             self.issue['body'] = '### 问题\n启动失败'

@@ -115,14 +115,17 @@ def _resolve_section_name(key: str, field_names: dict[str, str]) -> str | None:
 def _sections(
     body: str, *, normalize_hints: bool = False, field_keys: set[str] | None = None,
     field_names: dict[str, str] | None = None,
+    field_types: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """提取 Markdown 章节及内容，忽略代码块和引用中的伪标题。
 
     Args:
         body: Issue 的原始 Markdown 正文。
         normalize_hints: 匹配 Issue 时忽略章节名末尾的必填／选填提示；模板解析保留原名。
-        field_keys: 检查 Issue 时的模板字段键；提供时仅以这些字段划分章节，不按标题层级截断。
+        field_keys: 检查 Issue 时的模板字段键；提供时以这些字段识别章节。
         field_names: 章节书写形式到模板字段键的映射，仅用于 Issue 检查。
+        field_types: 模板字段键到类型的映射；input/dropdown 在下一个正文标题处结束，
+            长文本仍延续到下一个模板字段，允许内部使用任意层级标题。
     Returns:
         忽略空白后的章节标题到填写内容的映射；同名章节合并，子节内容计入父节。
     """
@@ -134,6 +137,7 @@ def _sections(
         for i, token in enumerate(tokens)
         if token.type == "heading_open" and token.level == 0
     ]
+    all_headings = headings
     if field_names is not None:
         headings = [(start, level, resolved) for start, level, label in headings
                     if (resolved := _resolve_section_name(label, field_names)) is not None]
@@ -141,12 +145,16 @@ def _sections(
         headings = [heading for heading in headings if heading[2] in field_keys]
     sections: dict[str, list[str]] = {}
     for position, (start, level, label) in enumerate(headings):
-        # 模板本身按 Markdown 层级解析；Issue 按模板字段切分，自加小标题不截断字段。
-        end = next(
-            (i for i, depth, _ in headings[position + 1:]
-             if field_keys is not None or depth <= level),
-            len(tokens),
-        )
+        if field_types and field_types.get(label) in {"input", "dropdown"}:
+            # 短字段到下一个正文标题结束，包括模板未定义的章节。
+            end = next((i for i, _, _ in all_headings if i > start), len(tokens))
+        else:
+            # 模板本身按层级解析；Issue 长文本中的自加标题保留在当前字段内。
+            end = next(
+                (i for i, depth, _ in headings[position + 1:]
+                 if field_keys is not None or depth <= level),
+                len(tokens),
+            )
         parts = []
         for i in range(start + 3, end):
             token = tokens[i]
@@ -462,8 +470,8 @@ def check_issue(
         templates: 待匹配的 YAML/Markdown 模板字典列表，不能为空。
     Returns:
         一个字典，包含三个字段：
-            status 为 pass/partial_match/no_match；
-            matched_templates 为完全/部分匹配模板名称列表；
+            status 为 pass/no_match；
+            matched_templates 为完全匹配的模板名称；
             checks 为各模板的匹配情况，包含 template 名称及 problems 列表，每个问题包含 field、reason 和 message；如果模板缺少可检查的规则还会附加 limitation。
     Raises:
         ValueError: 模板列表为空或模板字段格式无效。
@@ -474,11 +482,10 @@ def check_issue(
     # 本地检查：逐一对照模板的标题前缀、必填章节及占位内容
     title_key = "".join(title.split())
     checks = [] # 记录各模板的检查结果
-    matched = [] # 记录候选模板
-    has_title_match = False
     for template in templates:
         fields = _fields(template)
-        field_keys = {_section_key(field["attributes"]["label"]) for field in fields}
+        field_types = {_section_key(field["attributes"]["label"]): field["type"] for field in fields}
+        field_keys = set(field_types)
         # 只保留无歧义的章节写法，完整字段名优先。
         candidates: dict[str, set[str]] = {}
         for key in field_keys:
@@ -486,7 +493,8 @@ def check_issue(
                 candidates.setdefault(form, set()).add(key)
         field_names = {form: next(iter(targets)) for form, targets in candidates.items() if len(targets) == 1}
         field_names.update({key: key for key in field_keys})
-        sections = _sections(body, normalize_hints=True, field_keys=field_keys, field_names=field_names)
+        sections = _sections(body, normalize_hints=True, field_keys=field_keys,
+                             field_names=field_names, field_types=field_types)
         selected_options = _checkbox_sections(body, field_keys=field_keys, field_names=field_names)
         markdown = template.get("format") == "markdown"
         problems = []
@@ -505,7 +513,6 @@ def check_issue(
         if not title_matches:
             problems.append({"field": "title", "reason": "title_prefix",
                              "message": f"标题应以 {prefix!r} 开头"})
-        required_sections = set()
         # 必填规则已统一为配置与文字指示的并集；已填写的选填下拉框也校验候选值。
         for field in fields:
             attributes = field["attributes"]
@@ -514,9 +521,7 @@ def check_issue(
             required = field.get("validations", {}).get("required", False)
             required_options = ([option for option in attributes["options"] if option.get("required", False)]
                                 if field["type"] == "checkboxes" else [])
-            if required or required_options:
-                required_sections.add(section_key)
-            elif field["type"] != "dropdown" or section_key not in sections:
+            if not (required or required_options) and (field["type"] != "dropdown" or section_key not in sections):
                 continue
             if section_key not in sections:
                 problems.append({"field": label, "reason": "missing_section",
@@ -568,35 +573,17 @@ def check_issue(
         ):
             check["limitation"] = "模板缺少可自动检查的标题或必填规则，无法判定格式是否通过。"
         checks.append(check)
-        if check.get("limitation"):
-            continue
-        # 记录候选模板
-        if prefix_key and title_matches:
-            if not has_title_match:
-                matched.clear() # 优先保留本次标题匹配的模板
-            has_title_match = True
-            matched.append(template["name"])
-        # 标题不符时，至少两个不同的必填章节全部出现，才按正文识别模板。
-        elif not has_title_match and (
-            (len(required_sections) >= 2 and required_sections <= sections.keys())
-            or (not prefix_key and any(
-                _section_key(field["attributes"]["label"]) in sections for field in fields))
-        ):
-            matched.append(template["name"])
 
-    # 返回匹配模板列表和各模板的检查结果
+    # 判断是否完全匹配
     complete = [check["template"] for check in checks if not check["problems"] and not check.get("limitation")]
-    if not has_title_match and len(matched) > 1:
-        matched = []  # 正文对应多个候选时，交给推荐流程，不强行选定模板。
-    status = "pass" if complete else "partial_match" if matched else "no_match"
-    return {"status": status, "matched_templates": complete or matched, "checks": checks}
+    return {"status": "pass" if complete else "no_match", "matched_templates": complete, "checks": checks}
 
 
 def recommend_template(
     title: str, body: str, templates: list[dict[str, Any]],
     agent_api_key: str, model: str = "", base_url: str = "",
 ) -> dict[str, Any]:
-    """启动一次 Claude Code 任务，调用配置的模型推荐模板，不修改格式检查结果。
+    """启动一次 Claude Code 任务，选择适用模板并逐项复核非完全匹配的 Issue。
 
     Args:
         title: Issue 原始标题。
@@ -606,11 +593,12 @@ def recommend_template(
         model: 服务商提供的模型名称。
         base_url: 服务商提供的 Anthropic 兼容接口地址。
     Returns:
-        一个字典，包含四个字段：
-            status 为 recommended / not_applicable / insufficient_info；
-            template 为推荐的模板名称；
+        一个字典，包含以下字段：
+            status 为 pass / needs_changes / recommended / not_applicable / insufficient_info；
+            template 为匹配或推荐的模板名称；
             reason 为原因；
-            maintainer 为可选的维护者建议文本。
+            maintainer 为可选的维护者建议文本；
+            problems 为模型确认的具体问题列表，仅在 status 为 needs_changes 时返回，每项包含 field、reason 和 message。
     Raises:
         IssueProcessingError: 配置缺失、调用失败、超时或响应无效；交由任务队列重试。
     """
@@ -626,6 +614,7 @@ def recommend_template(
         "fields": [{"label": field["attributes"]["label"],
                     "description": field["attributes"].get("description", ""),
                     "type": field["type"], "options": field["attributes"].get("options", []),
+                    "multiple": field["attributes"].get("multiple", False),
                     "placeholder": field["attributes"].get("placeholder", ""),
                     "value": field["attributes"].get("value", ""),
                     "required": field.get("validations", {}).get("required", False)}
@@ -692,10 +681,10 @@ def recommend_template(
         reason = suggestion["reason"]
         maintenance = suggestion.get("maintainer")
         # 校验推荐状态
-        if status not in {"recommended", "not_applicable", "insufficient_info"}:
+        if status not in {"pass", "needs_changes", "recommended", "not_applicable", "insufficient_info"}:
             raise ValueError("推荐状态无效")
         # 校验模板名
-        if status == "recommended":
+        if status in {"pass", "needs_changes", "recommended"}:
             if name not in {t["name"] for t in templates}:
                 raise ValueError("推荐模板无效")
         elif name is not None:
@@ -710,8 +699,28 @@ def recommend_template(
             if not isinstance(maintenance, str) or not 1 <= len(maintenance.strip()) <= 500:
                 raise ValueError("维护者建议无效")
             maintenance = maintenance.strip()
-        return {"status": status, "template": name, "reason": reason.strip(),
-                "maintainer": maintenance}
+        result = {"status": status, "template": name, "reason": reason.strip(),
+                  "maintainer": maintenance}
+        if status == "needs_changes":
+            # 校验问题列表
+            problems = suggestion["problems"]
+            if not isinstance(problems, list) or not problems:
+                raise ValueError("需要修改时须提供具体问题")
+            selected = next(t for t in candidates if t["name"] == name)
+            labels = {field["label"] for field in selected["fields"]}
+            # 逐条检查问题格式
+            for problem in problems:
+                if not isinstance(problem, dict):
+                    raise ValueError("问题格式无效")
+                if problem["reason"] not in {"title_prefix", "body"}:
+                    raise ValueError("问题类型无效")
+                allowed_fields = {"title"} if problem["reason"] == "title_prefix" else labels
+                if problem["field"] not in allowed_fields:
+                    raise ValueError("问题字段不属于所选模板")
+                if not isinstance(problem["message"], str) or not 1 <= len(problem["message"].strip()) <= 200:
+                    raise ValueError("问题说明无效")
+            result["problems"] = problems
+        return result
     except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.TimeoutExpired) as exc:
         if isinstance(exc, subprocess.TimeoutExpired):
             reason = "模型响应超时，未能完成模板推荐。"
@@ -827,11 +836,11 @@ def format_compliance_check(result: dict[str, Any], *,
 
     Args:
         result: 检查结果。通过时 status 为 pass，或未匹配且 recommendation.status 为
-            not_applicable；部分匹配时包含 matched_templates 和 checks；未匹配时包含
-            recommendation，其 status 为 recommended 或 insufficient_info。
+            not_applicable；未匹配时包含 recommendation，其 status 为 needs_changes、
+            recommended 或 insufficient_info，needs_changes 的 problems 为模型确认的缺项。
         templates: 已解析的仓库模板，提供可复制的标题和正文。
     Returns:
-        完整 Markdown 检查章节。通过时返回通过通知；部分匹配仅展示有问题的标题或正文；
+        完整 Markdown 检查章节。通过时返回通过通知；需要完善时仅展示有问题的标题或正文；
         推荐成功展示指定模板，信息不足展示所有候选模板。
     Raises:
         IssueProcessingError: 检查或推荐状态不属于需要贡献者修改的有效结果。
@@ -841,34 +850,28 @@ def format_compliance_check(result: dict[str, Any], *,
             result["status"] == "no_match"
             and result.get("recommendation", {}).get("status") == "not_applicable"):
         return render_comment_template("passed")
-    # 2. 部分匹配
-    if result["status"] == "partial_match":
-        comments = []
-        for check in result["checks"]:
-            # 只反馈本次匹配到的模板
-            if check["template"] in result["matched_templates"]:
-                name = check["template"]
-                # 提取未匹配的部分
-                problems = "\n".join(
-                    f"- {_escape_comment_text(p['field'])}：{_escape_comment_text(p['message'])}"
-                    for p in check["problems"])
-                selected = next((t for t in templates if t["name"] == name), None)
-                template_text = ""
-                if selected is not None:
-                    show_title = any(p["reason"] == "title_prefix" for p in check["problems"])
-                    show_body = any(p["reason"] != "title_prefix" for p in check["problems"])
-                    template_lines = _format_template(selected, show_title=show_title, show_body=show_body)
-                    template_text = "\n".join(template_lines)
-                # 渲染评论
-                comments.append(render_comment_template("partial_match",
-                    name=_escape_comment_text(name), problems=problems, template=template_text))
-        return "\n\n".join(comments)
-    # 3. 未匹配
+    # 2. 未完全匹配时，依据模型复核结果生成完善或推荐建议。
     if result["status"] == "no_match":
         recommendation = result.get("recommendation", {})
         decision = recommendation.get("status")
-        # 3.1 已推荐具体模板：展示推荐原因和该模板的完整标题、正文
+        # 2.1 部分匹配
+        if decision == "needs_changes":
+            name = recommendation["template"]
+            problems = recommendation["problems"]
+            problem_text = "\n".join(
+                f"- {_escape_comment_text(p['field'])}：{_escape_comment_text(p['message'])}"
+                for p in problems)
+            selected = next((t for t in templates if t["name"] == name), None)
+            template_text = ""
+            if selected is not None:
+                template_text = "\n".join(_format_template(
+                    selected, show_title=any(p["reason"] == "title_prefix" for p in problems),
+                    show_body=any(p["reason"] != "title_prefix" for p in problems)))
+            return render_comment_template("needs_changes", name=_escape_comment_text(name),
+                                           problems=problem_text, template=template_text)
+        # 2.2 未匹配
         if decision == "recommended":
+            # 已推荐具体模板：展示推荐原因和该模板的完整标题、正文
             name = recommendation["template"]
             selected = next((t for t in templates if t["name"] == name), None)
             template_text = ""
@@ -877,7 +880,7 @@ def format_compliance_check(result: dict[str, Any], *,
                 template_text = "\n".join(template_lines)
             # 渲染评论
             return render_comment_template("recommended", reason=_escape_comment_text(recommendation["reason"]), name=_escape_comment_text(name), template=template_text)
-        # 3.2 信息不足：展示所有仓库模板，并在折叠栏注明名称，供贡献者补充后选择。
+        # 2.3信息不足：展示所有仓库模板，并在折叠栏注明名称，供贡献者补充后选择。
         if decision == "insufficient_info":
             template_blocks = ["\n".join(_format_template(t, show_name=True)) for t in templates]
             # 渲染评论

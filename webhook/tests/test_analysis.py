@@ -43,37 +43,24 @@ class AnalysisTests(unittest.TestCase):
             self.assertEqual(result["maintainer_suggestion"] is not None, status == "no_match")
             self.assertEqual(format_check.call_count, 1)
 
-    def test_matched_issue_does_not_request_recommendation(self):
-        """完全或部分匹配时保留检查结果，不调用模板推荐。
+    def test_fully_matched_issue_does_not_request_recommendation(self):
+        """本地完全匹配直接通过，即使正文语义与标题类型不同也不调用模型。"""
+        with patch.object(compliance, "recommend_template") as recommend:
+            result = analysis.analyze_issue("[Bug] 新功能", "### 问题描述\n希望增加新功能", [TEMPLATE_FILE], "",
+                                            repository="example/repo", number=18)
+        self.assertEqual(result["summary"], {"status": "pass", "recommendation_status": None})
+        self.assertEqual(result["comment"], "")
+        self.assertFalse(result["publish_comment"])
+        self.assertIsNone(result["maintainer_suggestion"])
+        recommend.assert_not_called()
 
-        Args:
-            无。
-        Returns:
-            None；验证两种匹配状态均不会触发模型调用。
-        """
-        for body, status in (("### 问题描述\n启动失败", "pass"), ("缺少章节", "partial_match")):
-            with self.subTest(status=status), patch.object(compliance, "recommend_template") as recommend:
-                result = analysis.analyze_issue("[Bug] 启动失败", body, [TEMPLATE_FILE], "key",
-                                                repository="example/repo", number=18)
-                self.assertEqual(result["summary"], {"status": status, "recommendation_status": None})
-                if status == "pass":
-                    self.assertEqual(result["comment"], "")
-                else:
-                    self.assertTrue(result["comment"].startswith("### 提交内容规范性检查"))
-                self.assertEqual(result["publish_comment"], status != "pass")
-                self.assertIsNone(result["maintainer_suggestion"])
-                recommend.assert_not_called()
-
-    def test_section_formatting_preserves_local_pass_and_partial_matching(self):
+    def test_section_formatting_preserves_local_pass(self):
         template = {**TEMPLATE, 'body': [{'type': 'textarea',
             'attributes': {'label': 'Environment / 环境信息 (Mandatory / 必填)'},
             'validations': {'required': True}}]}
         file = {**TEMPLATE_FILE, 'content': yaml.safe_dump(template)}
         for body, status in (('### 环境信息：\nLinux', 'pass'),
-                             ('### Runtime environment / 环境信息：\nLinux', 'pass'),
-                             ('### Runtime environment / 环境信息：\n', 'partial_match'),
-                             ('### ENVIRONMENT:\n', 'partial_match'),
-                             ('### 运行环境\nLinux', 'partial_match')):
+                             ('### Runtime environment / 环境信息：\nLinux', 'pass')):
             with self.subTest(body=body), patch.object(compliance, 'recommend_template') as recommend:
                 result = analysis.analyze_issue('[Bug] 错误', body, [file], '',
                                                 repository='example/repo', number=18)
@@ -87,8 +74,7 @@ class AnalysisTests(unittest.TestCase):
             'validations': {'required': True}}]}
         file = {**TEMPLATE_FILE, 'content': yaml.safe_dump(template)}
         for body, status in (('### 日志 / 结果\n错误输出', 'pass'),
-                             ('### Related log / 日志\n错误输出', 'pass'),
-                             ('### 日志\n', 'partial_match'), ('缺少章节', 'partial_match')):
+                             ('### Related log / 日志\n错误输出', 'pass')):
             with self.subTest(body=body), patch.object(compliance, 'recommend_template') as recommend:
                 result = analysis.analyze_issue('[Bug] 错误', body, [file], '',
                                                 repository='example/repo', number=18)
@@ -171,21 +157,20 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(raised.exception.retryable)
         format_check.assert_not_called()
 
-    def test_comment_uses_compliance_section(self):
-        """评论总入口直接使用检查章节，并传递规范性检查所需的上下文。
-
-        Args:
-            无。
-        Returns:
-            None；验证检查章节及模板参数的传递。
-        """
-        result = compliance.check_issue("[Bug] 启动失败", "缺少章节", [TEMPLATE])
+    def test_comment_uses_reviewed_problems(self):
+        """复核后只发布模型确认的缺项，不能带回本地字面匹配的误报。"""
+        problem = {"field": "问题描述", "reason": "body", "message": "请补充问题描述字段"}
+        review = {"status": "needs_changes", "template": "缺陷反馈", "reason": "缺陷模板适用",
+                  "maintainer": None, "problems": [problem]}
         section = "### 提交内容规范性检查：未通过"
-        with patch.object(compliance, "format_compliance_check", return_value=section) as format_check:
-            output = analysis.analyze_issue("[Bug] 启动失败", "缺少章节", [TEMPLATE_FILE], "key",
+        with patch.object(compliance, "recommend_template", return_value=review), patch.object(
+                compliance, "format_compliance_check", return_value=section) as format_check:
+            output = analysis.analyze_issue("【Bug】启动失败", "缺少章节", [TEMPLATE_FILE], "key",
                                             repository="example/repo", number=18, maintainers=("alice",))
         self.assertEqual(output["comment"], section)
-        format_check.assert_called_once_with(result, templates=[TEMPLATE])
+        expected = compliance.check_issue("【Bug】启动失败", "缺少章节", [TEMPLATE])
+        expected["recommendation"] = review
+        format_check.assert_called_once_with(expected, templates=[TEMPLATE])
 
     def test_missing_templates_save_advice_for_configured_maintainers(self):
         """缺少模板时静默记录维护者建议，未配置名单时仍保留建议。

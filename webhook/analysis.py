@@ -41,7 +41,7 @@ def analyze_issue(
         body: Issue 原始 Markdown 正文。
         template_files: 模板原文列表，每项含 filename（文件名）、source（来源路径）、
             content（UTF-8 文本）；来源可以是当前仓库或组织公共仓库。
-        agent_api_key: 模板推荐使用的模型认证密钥；需要推荐但密钥为空时抛出可重试错误。
+        agent_api_key: 分析使用的模型认证密钥；需要模型参与但密钥为空时抛出可重试错误。
         model: 服务商提供的模型名称。
         base_url: 服务商提供的 Anthropic 兼容接口地址。
         repository: 仓库路径，格式为 owner/repo，用于标识模板缺失的来源。
@@ -50,7 +50,7 @@ def analyze_issue(
         previously_commented: 此前是否已有检查评论或待确认的评论发送记录，用于决定通过后是否通知。
     Returns:
         包含 summary 和 comment 的字典：summary 是可保存的结果摘要，
-        当前包含 status（基础匹配状态）和 recommendation_status（推荐状态或 None）；
+        当前包含 status（最终检查状态）和 recommendation_status（模型复核状态或 None）；
         publish_comment 决定是否新增或更新评论；maintainer_suggestion 为待保存的维护者建议，
         无建议时为 None；
         comment 是汇总各项检查的 Markdown 评论，静默时为空；模板缺失或配置错误时
@@ -81,10 +81,13 @@ def analyze_issue(
         result = {"status": "template_error", "template_problems": template_problems}
     else:
         result = compliance.check_issue(title, body, templates)
-    # 3）若基础检查未匹配到模板，则尝试调用模型推荐模板
+    # 3）完全匹配直接通过；其余统一由模型选定模板并逐项复核。
     if result["status"] == "no_match":
         result["recommendation"] = compliance.recommend_template(
             title, body, templates, agent_api_key, model, base_url)
+        # 模型符合发现是pass时需要改变现有状态
+        if result["recommendation"]["status"] == "pass":
+            result["status"] = "pass"
     recommendation = result.get("recommendation", {})
     # 4）模板配置故障或现有模板无法覆盖时，记录给维护者的建议
     maintainer_suggestion = None

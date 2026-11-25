@@ -86,7 +86,7 @@ class WorkerTests(unittest.TestCase):
         Returns:
             None；验证无需了解具体检查字段即可处理新的分析结果。
         """
-        output = {"summary": {"status": "partial_match", "additional_check": "completed"},
+        output = {"summary": {"status": "no_match", "additional_check": "completed"},
                   "comment": "统一分析入口生成的完整评论", "publish_comment": True,
                   "maintainer_suggestion": None}
         with patch.object(atomgit.AtomGit, "request", side_effect=self.responses()) as api, patch.object(
@@ -125,16 +125,16 @@ class WorkerTests(unittest.TestCase):
             None；通过断言核对预期结果。
         """
         cases = (
-            ("question.md", "### 问题描述\n请填写", ISSUE, "pass", "通过模板规范检查"),
+            ("question.md", "### 问题描述\n请填写", ISSUE, "pass", None, "通过模板规范检查"),
             ("question.md", "### 问题描述\n请填写", {**ISSUE, "body": "### 问题描述\n请填写"},
-             "partial_match", "此必填章节为空或仅含占位内容"),
-            ("question.md", "请填写问题描述", ISSUE, "no_match", "未匹配现有模板"),
+             "no_match", "needs_changes", "此必填章节为空或仅含占位内容"),
+            ("question.md", "请填写问题描述", ISSUE, "no_match", "recommended", "未匹配现有模板"),
             ("check.yml", yaml.safe_dump({"name": "确认", "title": "[Bug] ", "body": [
                 {"type": "checkboxes", "attributes": {"label": "确认项", "options": [
                     {"label": "已阅读说明", "required": True}]}}]}),
-             {**ISSUE, "body": "### 确认项\n- [x] 已阅读说明"}, "pass", "通过模板规范检查"),
+             {**ISSUE, "body": "### 确认项\n- [x] 已阅读说明"}, "pass", None, "通过模板规范检查"),
         )
-        for filename, content, issue, status, message in cases:
+        for filename, content, issue, status, review_status, message in cases:
             with self.subTest(filename=filename):
                 with receiver.connect(self.config) as db:
                     db.execute("DELETE FROM issue_checks")
@@ -142,8 +142,11 @@ class WorkerTests(unittest.TestCase):
                 responses[2] = [{"type": "file", "name": filename}]
                 responses[3] = {"encoding": "base64", "content": base64.b64encode(content.encode()).decode()}
                 with patch.object(atomgit.AtomGit, "request", side_effect=responses) as api, patch.object(
-                        compliance, "recommend_template", return_value={"status": "recommended",
-                            "template": "question", "reason": "适合描述当前问题"}) as model:
+                        compliance, "recommend_template", return_value={
+                            "status": review_status,
+                            "template": "question", "reason": "适合描述当前问题",
+                            "problems": [{"field": "问题描述", "reason": "body",
+                                          "message": "此必填章节为空或仅含占位内容"}]}) as model:
                     result = worker._process_issue(self.config, "example/repo", 12, client=atomgit.AtomGit(self.config.token, request_interval=0))
                 self.assertEqual(result["status"], status)
                 self.assertEqual(result["comment_action"], "suppressed" if status == "pass" else "created")
@@ -152,10 +155,9 @@ class WorkerTests(unittest.TestCase):
                 else:
                     comment = api.call_args.args[2]["body"]
                     self.assertIn(message, comment)
-                if status == "no_match":
+                if status != "pass":
                     model.assert_called_once()
-                    self.assertEqual(result["recommendation_status"], "recommended")
-                    self.assertIn("#### 模板推荐：", comment)
+                    self.assertEqual(result["recommendation_status"], review_status)
                     self.assertIn("提交内容规范性检查：未通过", comment)
                 else:
                     model.assert_not_called()
@@ -321,18 +323,19 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(json.loads(records[repository]["mtr"]), list(expected))
             self.assertIn("建议新增成员申请模板", records[repository]["suggestion"])
 
-    def test_partial_match_does_not_call_model(self):
-        """验证部分匹配模板时只返回格式检查结果，不调用模型。
-
-        Args:
-            无。
-        Returns:
-            None；通过断言验证上述行为，结果不符时测试失败。
-        """
+    def test_needs_changes_calls_model_before_publishing(self):
+        """未完全匹配统一复核，评论只包含复核确认的问题。"""
         issue = {**ISSUE, "body": ""}
-        with patch.object(atomgit.AtomGit, "request", side_effect=self.responses(issue)), patch.object(compliance, "recommend_template") as model:
-            self.assertEqual(worker._process_issue(self.config, "example/repo", 12, client=atomgit.AtomGit(self.config.token, request_interval=0))["status"], "partial_match")
-        model.assert_not_called()
+        review = {"status": "needs_changes", "template": "缺陷反馈", "reason": "标题已声明缺陷",
+                  "problems": [{"field": "问题描述", "reason": "body", "message": "请补充问题描述"}]}
+        with patch.object(atomgit.AtomGit, "request", side_effect=self.responses(issue)) as api, patch.object(
+                compliance, "recommend_template", return_value=review) as model:
+            result = worker._process_issue(self.config, "example/repo", 12,
+                                          client=atomgit.AtomGit(self.config.token, request_interval=0))
+        self.assertEqual(result["status"], "no_match")
+        self.assertEqual(result["recommendation_status"], "needs_changes")
+        self.assertIn("请补充问题描述", api.call_args.args[2]["body"])
+        model.assert_called_once()
 
     def test_missing_model_key_retries_without_comment(self):
         """验证模型密钥缺失时抛出可重试错误，不发布评论。
@@ -401,7 +404,10 @@ class WorkerTests(unittest.TestCase):
         client = atomgit.AtomGit(self.config.token, request_interval=0)
         issue = {**ISSUE, "body": "缺少章节"}
         edited = {**issue, "body": issue["body"] + "\n\n."}
-        with patch.object(client, "request", side_effect=[*self.responses(issue), edited, edited, {}]) as api:
+        review = {"status": "needs_changes", "template": "缺陷反馈", "reason": "缺陷模板适用",
+                  "problems": [{"field": "问题描述", "reason": "body", "message": "请补充问题描述"}]}
+        with patch.object(client, "request", side_effect=[*self.responses(issue), edited, edited, {}]) as api, patch.object(
+                compliance, "recommend_template", return_value=review):
             with app.test_client() as receiver_client:
                 for index in range(2):
                     payload = {"object_kind": "issue", "uuid": f"edit-{index}",

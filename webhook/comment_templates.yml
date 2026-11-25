@@ -5,11 +5,11 @@ passed: |-
   ### 提交内容规范性检查：通过
 
 # 部分匹配
-partial_match: |-
+needs_changes: |-
   ### 提交内容规范性检查：未通过
 
   #### 原因：部分匹配现有模板
-  此 Issue 已使用 **{name}** 模板，但仍有以下未匹配项：
+  按 **{name}** 模板检查，此 Issue 仍需修改以下内容：
 
   {problems}
 

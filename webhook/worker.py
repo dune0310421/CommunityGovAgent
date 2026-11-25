@@ -81,9 +81,9 @@ def _process_issue(config: Config, repository: str, number: int, *, client: Atom
         number: 仓库内的正整数 Issue 编号。
         client: 由 run_worker 创建并复用的客户端，用于保留缓存和请求间隔。
     Returns:
-        处理结果字典。status 为 pass、partial_match、no_match、template_error、skipped_closed
+        处理结果字典。status 为 pass、no_match、template_error、skipped_closed
         或 skipped_unchanged；comment_action 为 created、updated、recovered、suppressed、skipped_closed 或 unchanged。
-        执行过分析时还包含 recommendation_status，为模型推荐状态或 None；
+        执行过分析时还包含 recommendation_status，为模型复核状态或 None；
         首次读取即发现 Issue 已关闭时不包含该字段。
     """
     if repository not in config.repositories:
@@ -311,7 +311,7 @@ def process_one(
                               result = ?, last_error = NULL, updated_at = ?
                               WHERE event_id = ? AND attempts = ? AND state IN ('running', 'superseded')""",
                            (json.dumps(result, ensure_ascii=False), now, row["event_id"], attempt))
-            statuses = {"pass": "基础格式通过", "partial_match": "格式待补充", "no_match": "未匹配模板",
+            statuses = {"pass": "规范检查通过", "no_match": "未匹配模板",
                         "template_error": "模板配置异常，维护者建议已入库", "skipped_closed": "Issue 已关闭",
                         "skipped_unchanged": "标题和正文已检查，跳过重复处理"}
             actions = {"created": "已发布评论", "recovered": "已找到先前发布的评论，恢复完成状态", "unchanged": "未重复发布评论",

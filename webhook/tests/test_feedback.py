@@ -21,6 +21,16 @@ SUGGESTION = {"status": "recommended", "template": "缺陷反馈", "reason": "�
               "maintainer": None}
 
 
+def reviewed_changes(title, body, template):
+    """构造评论单元测试的模型复核缺项，独立于分析入口的路由测试。"""
+    local_problems = compliance.check_issue(title, body, [template])["checks"][0]["problems"]
+    problems = [{**p, "reason": "title_prefix" if p["reason"] == "title_prefix" else "body"}
+                for p in local_problems]
+    return {"status": "no_match", "recommendation": {
+        "status": "needs_changes", "template": template["name"], "reason": "模板适用，仍需补充",
+        "maintainer": None, "problems": problems}}
+
+
 class FeedbackTests(unittest.TestCase):
     def recommend(self, suggestion):
         """模拟模型响应并通过实际推荐结果解析流程。
@@ -168,8 +178,8 @@ class FeedbackTests(unittest.TestCase):
         self.assertNotIn("@someone", visible)
         self.assertIn("**模板正文（Markdown）**", comment)
 
-    def test_partial_match_provides_template_without_issue_content(self):
-        """部分匹配列出原有缺项，复制内容仅来自模板。
+    def test_needs_changes_provides_template_without_issue_content(self):
+        """模型复核列出确认的缺项，复制内容仅来自模板。
 
         Args:
             无。
@@ -177,10 +187,10 @@ class FeedbackTests(unittest.TestCase):
             None；核对原 Issue 的标题和正文未被填入模板。
         """
         raw = '```bash\necho "hello"\n```\n[日志](https://example.com/log)'
-        result = compliance.check_issue("[Bug] 启动失败", "### 问 题描述\n" + raw, [TEMPLATE])
-        self.assertEqual(result["status"], "partial_match")
+        result = reviewed_changes("[Bug] 启动失败", "### 问 题描述\n" + raw, TEMPLATE)
+        self.assertEqual(result["status"], "no_match")
         comment = compliance.format_compliance_check(result, templates=[TEMPLATE])
-        self.assertIn("此 Issue 已使用 **缺陷反馈** 模板，但仍有以下未匹配项：", comment)
+        self.assertIn("按 **缺陷反馈** 模板检查，此 Issue 仍需修改以下内容：", comment)
         self.assertIn("#### 模板完善建议", comment)
         self.assertNotIn("建议使用：", comment)
         self.assertNotIn("#### 模板推荐", comment)
@@ -195,8 +205,8 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn("请输入", fences[0])
         self.assertNotIn("@qiurq1", comment)
 
-    def test_partial_match_only_displays_template_parts_with_problems(self):
-        """验证 YAML 和 Markdown 部分匹配仅展示存在问题的标题或正文。
+    def test_needs_changes_only_displays_template_parts_with_problems(self):
+        """验证 YAML 和 Markdown 复核结果仅展示存在问题的标题或正文。
 
             Args:
                 无。
@@ -214,8 +224,8 @@ class FeedbackTests(unittest.TestCase):
         for template in (TEMPLATE, markdown):
             for title, body, expected_parts in cases:
                 with self.subTest(format=template.get('format', 'yaml'), parts=expected_parts):
-                    result = compliance.check_issue(title, body, [template])
-                    self.assertEqual(result['status'], 'partial_match')
+                    result = reviewed_changes(title, body, template)
+                    self.assertEqual(result['status'], 'no_match')
                     comment = compliance.format_compliance_check(result, templates=[template])
                     fences = [t for t in MarkdownIt('commonmark').parse(comment) if t.type == 'fence']
                     self.assertEqual([t.info for t in fences], expected_parts)
@@ -238,7 +248,7 @@ class FeedbackTests(unittest.TestCase):
             """
         template = {**TEMPLATE, 'body': [
             {'type': 'textarea', 'attributes': {'label': 'title'}, 'validations': {'required': True}}]}
-        result = compliance.check_issue('[Bug] 启动失败', '', [template])
+        result = reviewed_changes('[Bug] 启动失败', '', template)
         comment = compliance.format_compliance_check(result, templates=[template])
         self.assertIn('**模板正文（Markdown）**', comment)
         self.assertNotIn('**模板标题**', comment)
@@ -302,7 +312,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn('### 平台', copied)
         self.assertIn('请选择一项：Linux、Windows', copied)
         self.assertIn('\nLinux\n', copied)
-        self.assertEqual(compliance.check_issue('[Bug] 错误', copied, [template])['status'], 'partial_match')
+        self.assertEqual(compliance.check_issue('[Bug] 错误', copied, [template])['status'], 'no_match')
         filled = copied.replace('<!-- 请填写 -->', '启动失败')
         self.assertEqual(compliance.check_issue('[Bug] 错误', filled, [template])['status'], 'pass')
         with patch.object(compliance.subprocess, 'Popen') as popen, patch.object(compliance.os, 'killpg'):
@@ -320,7 +330,7 @@ class FeedbackTests(unittest.TestCase):
             with self.subTest(label=label):
                 template['body'][1]['attributes']['label'] = label
                 self.assertEqual('\n'.join(compliance._format_template(template)), comment)
-                self.assertEqual(compliance.check_issue('[Bug] 错误', copied, [template])['status'], 'partial_match')
+                self.assertEqual(compliance.check_issue('[Bug] 错误', copied, [template])['status'], 'no_match')
                 self.assertEqual(compliance.check_issue('[Bug] 错误', filled, [template])['status'], 'pass')
 
     def test_markdown_template_body_is_preserved(self):
@@ -345,9 +355,9 @@ class FeedbackTests(unittest.TestCase):
         Returns:
             None；核对结果非空、栏目顺序及维护者提及范围。
         """
-        partial = compliance.check_issue("[Bug] 失败", "### 问题描述\n失败", [TEMPLATE])
+        incomplete = reviewed_changes("[Bug] 失败", "### 问题描述\n失败", TEMPLATE)
         cases = [
-            (partial, ["原因：部分匹配现有模板", "模板完善建议：缺陷反馈"]),
+            (incomplete, ["原因：部分匹配现有模板", "模板完善建议：缺陷反馈"]),
             ({"status": "no_match", "recommendation": SUGGESTION},
              ["原因：未匹配现有模板", "模板推荐：缺陷反馈"]),
             ({"status": "no_match", "recommendation": {"status": "insufficient_info", "reason": "请说明诉求"}},

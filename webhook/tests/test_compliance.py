@@ -43,7 +43,7 @@ class ComplianceTests(unittest.TestCase):
                 self.assertIn("title_prefix", [p["reason"] for p in result["checks"][0]["problems"]])
 
     def test_format_results_and_code_block_headings(self):
-        """验证格式检查的三种结论，并确认代码块中的标题不被当作有效章节。
+        """验证格式检查的两种结论，并确认代码块中的标题不被当作有效章节。
 
         Args:
             无。
@@ -52,8 +52,8 @@ class ComplianceTests(unittest.TestCase):
         """
         for title, body, status in (
             ("[Bug] 错误", "### 问题描述\n启动失败", "pass"),
-            ("[Bug] 错误", "### 问题描述\n请输入", "partial_match"),
-            ("[Bug] 错误", "```\n### 问题描述\n伪造正文\n```", "partial_match"),
+            ("[Bug] 错误", "### 问题描述\n请输入", "no_match"),
+            ("[Bug] 错误", "```\n### 问题描述\n伪造正文\n```", "no_match"),
             ("其他", "没有章节", "no_match"),
         ):
             with self.subTest(body=body):
@@ -161,10 +161,10 @@ class ComplianceTests(unittest.TestCase):
             None；章节判断与预期不符时测试失败。
         """
         for body, status in (
-            ("> ### 问题描述\n> 引用中的内容", "partial_match"),
-            ("### 问题描述\n<!-- 仅有填写说明 -->", "partial_match"),
-            ("### 问题描述\n#### 子标题", "partial_match"),
-            ("### 问题描述\n_No response_", "partial_match"),
+            ("> ### 问题描述\n> 引用中的内容", "no_match"),
+            ("### 问题描述\n<!-- 仅有填写说明 -->", "no_match"),
+            ("### 问题描述\n#### 子标题", "no_match"),
+            ("### 问题描述\n_No response_", "no_match"),
             ("### 问题描述\n```python\nraise RuntimeError()\n```", "pass"),
             ("### 问题描述\n#### 子标题\n实际问题", "pass"),
             ("### 问题描述\n\n### 问题描述\n补充内容", "pass"),
@@ -202,23 +202,20 @@ class ComplianceTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["checks"][0]["problems"], [])
 
-    def test_title_match_takes_priority_over_section_match_in_any_order(self):
-        """验证多个模板竞争时标题匹配优先于章节匹配，结果不依赖模板顺序。
-
-        Args:
-            无。
-        Returns:
-            None；候选模板或评论包含无关模板时测试失败。
-        """
+    def test_incomplete_title_match_does_not_select_a_template(self):
+        """标题匹配但缺字段时统一未匹配，不预先锁定候选或生成评论。"""
         other = {**TEMPLATE, "name": "功能请求", "title": "[Feature] "}
         for title in ("[Bug] 错误", "[Bug]错误", "  [ B ug ]\u3000错误"):
             for templates in ([other, TEMPLATE], [TEMPLATE, other]):
                 with self.subTest(title=title, names=[t["name"] for t in templates]):
                     result = compliance.check_issue(title, "### 问题描述\n请输入", templates)
-                    self.assertEqual(result["matched_templates"], ["缺陷反馈"])
-                    comment = compliance.format_compliance_check(result)
-                    self.assertIn("缺陷反馈", comment)
-                    self.assertNotIn("功能请求", comment)
+                    self.assertEqual(result["status"], "no_match")
+                    self.assertEqual(result["matched_templates"], [])
+                    with self.assertRaises(IssueProcessingError):
+                        compliance.format_compliance_check(result)
+                    complete = compliance.check_issue(title, "### 问题描述\n实际问题", templates)
+                    self.assertEqual(complete["status"], "pass")
+                    self.assertEqual(complete["matched_templates"], ["缺陷反馈"])
         result = compliance.check_issue("未知标题", "### 问题描述\n实际问题", [TEMPLATE, other])
         self.assertEqual(result["matched_templates"], [])
         self.assertEqual(result["status"], "no_match")
@@ -324,7 +321,7 @@ class ComplianceTests(unittest.TestCase):
                         incomplete = "\n".join(f"### {key}\n{value if key == label else text}"
                             for key, text in sections.items() if key != label or value is not None)
                         result = compliance.check_issue(template["title"] + "测试", incomplete, [template])
-                        self.assertEqual(result["status"], "partial_match")
+                        self.assertEqual(result["status"], "no_match")
                         self.assertIn({"field": label, "reason": reason,
                             "message": "缺少此必填章节" if value is None else "此必填章节为空或仅含占位内容"},
                             result["checks"][0]["problems"])
@@ -353,6 +350,66 @@ class ComplianceTests(unittest.TestCase):
         self.assertEqual(compliance.check_issue("[Bug] 测试", "", [{**template, "body": [optional]}])["status"], "pass")
 
 
+
+class FieldBoundaryTests(unittest.TestCase):
+    def test_scalar_fields_stop_at_unknown_headings_at_any_level(self):
+        for kind in ('dropdown', 'input'):
+            template = {'name': '测试', 'title': '[Test]', 'body': [
+                {'type': kind, 'attributes': {'label': 'Platform（平台）', 'options': ['Linux']},
+                 'validations': {'required': True}},
+                {'type': 'textarea', 'attributes': {'label': '备注'},
+                 'validations': {'required': True}},
+            ]}
+            key = compliance._section_key('Platform（平台）')
+            for level in range(1, 7):
+                body = ('### 平台\nLinux\n\n' + '#' * level +
+                        ' 期望结果\n这段内容属于另外的章节。\n\n### 备注\n补充信息')
+                with self.subTest(kind=kind, level=level):
+                    sections = compliance._sections(
+                        body, normalize_hints=True, field_keys={key, '备注'},
+                        field_names={'平台': key, '备注': '备注'},
+                        field_types={key: kind, '备注': 'textarea'})
+                    self.assertEqual(sections, {key: 'Linux', '备注': '补充信息'})
+                    self.assertEqual(compliance.check_issue('[Test] test', body, [template])['status'], 'pass')
+
+    def test_unknown_section_does_not_fill_an_empty_scalar_field(self):
+        for kind in ('dropdown', 'input'):
+            template = {'name': '测试', 'title': '[Test]', 'body': [
+                {'type': kind, 'attributes': {'label': '平台', 'options': ['Linux']},
+                 'validations': {'required': True}},
+            ]}
+            with self.subTest(kind=kind):
+                result = compliance.check_issue(
+                    '[Test] test', '### 平台\n\n### 其他信息\nLinux', [template])
+                self.assertEqual([p['reason'] for p in result['checks'][0]['problems']], ['empty_section'])
+
+    def test_textarea_keeps_internal_headings_at_any_level(self):
+        template = {'name': '测试', 'title': '[Test]', 'body': [
+            {'type': 'textarea', 'attributes': {'label': '问题描述'},
+             'validations': {'required': True}},
+            {'type': 'dropdown', 'attributes': {'label': '平台', 'options': ['Linux']},
+             'validations': {'required': True}},
+        ]}
+        for level in range(1, 7):
+            body = ('### 问题描述\n\n' + '#' * level +
+                    ' 实际现象\n程序崩溃。\n\n### 平台\nLinux')
+            with self.subTest(level=level):
+                self.assertEqual(compliance.check_issue('[Test] test', body, [template])['status'], 'pass')
+
+    def test_code_and_quote_headings_do_not_end_scalar_fields(self):
+        body = ('### 平台\nLinux\n\n'
+                '\x60\x60\x60markdown\n# 代码中的标题\n\x60\x60\x60\n'
+                '> # 引用中的标题\n\n'
+                '补充说明\n\n### 期望结果\n其他章节内容')
+        for kind in ('dropdown', 'input'):
+            with self.subTest(kind=kind):
+                sections = compliance._sections(
+                    body, normalize_hints=True, field_keys={'平台'},
+                    field_types={'平台': kind})
+                self.assertIn('补充说明', sections['平台'])
+                self.assertNotIn('其他章节内容', sections['平台'])
+
+
 class TemplateSelectionTests(unittest.TestCase):
     def test_bug_report_does_not_select_documentation_from_generic_heading(self):
         directory = TEMPLATE_FIXTURES
@@ -368,12 +425,13 @@ class TemplateSelectionTests(unittest.TestCase):
         bug = {**TEMPLATE, "title": "[Bug-Report|缺陷反馈]: "}
         for candidates in ([bug, *templates], [*templates, bug]):
             result = compliance.check_issue(title, "### 预期行为\n链接能打开。", candidates)
-            self.assertEqual(result["status"], "partial_match")
-            self.assertEqual(result["matched_templates"], [bug["name"]])
-            self.assertNotIn("文档反馈与改进", compliance.format_compliance_check(result))
+            self.assertEqual(result["status"], "no_match")
+            self.assertEqual(result["matched_templates"], [])
+            with self.assertRaises(IssueProcessingError):
+                compliance.format_compliance_check(result)
             self.assertEqual(compliance.check_issue(title, body, candidates)["status"], "pass")
 
-    def test_complete_documentation_structure_matches_despite_wrong_title(self):
+    def test_complete_documentation_structure_requires_matching_title(self):
         path = TEMPLATE_FIXTURES / "documentation_template.yml"
         template = compliance.parse_template(path.read_text(), path.name)
         headings = [field["attributes"]["label"] for field in template["body"]
@@ -383,10 +441,11 @@ class TemplateSelectionTests(unittest.TestCase):
                     if field.get("validations", {}).get("required")}
         body = "\n".join(f"### {label}\n{contents[label]}" for label in headings)
         result = compliance.check_issue("没有模板前缀", body, [template])
-        self.assertEqual(result["status"], "partial_match")
-        self.assertEqual(result["matched_templates"], [template["name"]])
+        self.assertEqual(result["status"], "no_match")
+        self.assertEqual(result["matched_templates"], [])
         self.assertEqual([p["reason"] for p in result["checks"][0]["problems"]], ["title_prefix"])
-        self.assertIn("标题应以", compliance.format_compliance_check(result))
+        with self.assertRaises(IssueProcessingError):
+            compliance.format_compliance_check(result)
         for missing in headings:
             with self.subTest(missing=missing):
                 incomplete = "\n".join(f"### {label}\n{contents[label]}" for label in headings if label != missing)
@@ -394,7 +453,7 @@ class TemplateSelectionTests(unittest.TestCase):
         # 内容为空仍能识别结构，但必须继续提示必填内容为空。
         empty = "\n".join(f"### {label}\n" for label in headings)
         result = compliance.check_issue("没有模板前缀", empty, [template])
-        self.assertEqual(result["status"], "partial_match")
+        self.assertEqual(result["status"], "no_match")
         self.assertIn("empty_section", [p["reason"] for p in result["checks"][0]["problems"]])
         other = {**template, "name": "另一模板", "title": "[Other]: "}
         for templates in ([template, other], [other, template]):
@@ -402,7 +461,7 @@ class TemplateSelectionTests(unittest.TestCase):
             self.assertEqual(result["status"], "no_match")
             self.assertEqual(result["matched_templates"], [])
             result = compliance.check_issue("[Other]: 测试", empty, templates)
-            self.assertEqual(result["matched_templates"], ["另一模板"])
+            self.assertEqual(result["matched_templates"], [])
 
     def test_required_checkbox_section_counts_but_optional_sections_do_not(self):
         template = {**TEMPLATE, "body": [*TEMPLATE["body"], {
@@ -410,17 +469,20 @@ class TemplateSelectionTests(unittest.TestCase):
                 {"label": "已阅读", "required": True}]}}, {
             "type": "textarea", "attributes": {"label": "备注"}}]}
         result = compliance.check_issue("未知标题", "### 问题描述\n实际问题\n### 确认项\n- [ ] 已阅读", [template])
-        self.assertEqual(result["status"], "partial_match")
+        self.assertEqual(result["status"], "no_match")
         self.assertIn("unchecked_required", [p["reason"] for p in result["checks"][0]["problems"]])
         result = compliance.check_issue("未知标题", "### 问题描述\n实际问题\n### 备注\n说明", [template])
         self.assertEqual(result["status"], "no_match")
 
-    def test_templates_without_title_still_match_by_sections(self):
+    def test_templates_without_title_still_require_filled_sections(self):
         template = {**TEMPLATE, "title": ""}
         result = compliance.check_issue("任意标题", "### 问 题描述\n请输入", [template])
-        self.assertEqual(result["status"], "partial_match")
-        self.assertEqual(result["matched_templates"], [template["name"]])
-        self.assertIn("此必填章节为空", compliance.format_compliance_check(result))
+        self.assertEqual(result["status"], "no_match")
+        self.assertEqual(result["matched_templates"], [])
+        self.assertIn("empty_section", [p["reason"] for p in result["checks"][0]["problems"]])
+        complete = compliance.check_issue("任意标题", "### 问题描述\n实际内容", [template])
+        self.assertEqual(complete["status"], "pass")
+        self.assertEqual(complete["matched_templates"], [template["name"]])
 
 
 class SectionHintMatchingTests(unittest.TestCase):
@@ -442,7 +504,7 @@ class SectionHintMatchingTests(unittest.TestCase):
                         for content, reason in (('启动失败', None), ('', 'empty_section'),
                                                 ('请输入', 'empty_section')):
                             result = compliance.check_issue('[Bug] 错误', f'### {heading}\n{content}', [template])
-                            self.assertEqual(result['status'], 'pass' if reason is None else 'partial_match')
+                            self.assertEqual(result['status'], 'pass' if reason is None else 'no_match')
                             if reason:
                                 self.assertEqual(result['checks'][0]['problems'], [
                                     {'field': label, 'reason': reason, 'message': '此必填章节为空或仅含占位内容'}])
@@ -471,7 +533,7 @@ class SectionHintMatchingTests(unittest.TestCase):
         body = '### 确认\n- [x] 已阅读（必选）\n### 平台\nLinux'
         self.assertEqual(compliance.check_issue('[确认]问题', body, [template])['status'], 'pass')
         result = compliance.check_issue('其他标题', body, [template])
-        self.assertEqual(result['matched_templates'], ['确认'])
+        self.assertEqual(result['matched_templates'], [])
         self.assertEqual([p['reason'] for p in result['checks'][0]['problems']], ['title_prefix'])
         for changed, reason in ((body.replace('[x]', '[ ]'), 'unchecked_required'),
                                 (body.replace('已阅读（必选）', '已阅读'), 'unchecked_required'),
@@ -480,7 +542,7 @@ class SectionHintMatchingTests(unittest.TestCase):
             self.assertIn(reason, [p['reason'] for p in result['checks'][0]['problems']])
         no_prefix = {**template, 'title': ''}
         self.assertEqual(compliance.check_issue('问题', '### 确认\n- [ ] 已阅读（必选）', [no_prefix])['status'],
-                         'partial_match')
+                         'no_match')
 
 
 class SectionFormattingTests(unittest.TestCase):
@@ -620,7 +682,7 @@ class SectionFormattingTests(unittest.TestCase):
                     result = compliance.check_issue(title, '### 日志\n实际日志', [template])
                     self.assertEqual(result['status'], 'pass')
                     result = compliance.check_issue(title, '### 日志\n', [template])
-                    self.assertEqual(result['status'], 'partial_match')
+                    self.assertEqual(result['status'], 'no_match')
                     self.assertEqual([p['reason'] for p in result['checks'][0]['problems']], ['empty_section'])
         template = {**self.template('日志'), 'title': 'Bug: '}
         for title in ('Bug 错误', 'Bug：错误', 'Bug:错误'):
@@ -661,8 +723,8 @@ class WhitespaceMatchingTests(unittest.TestCase):
             "validations": {"required": True}}]}
         for choice, expected in (("- [x] 已 阅读说明\t和\u3000协议", "pass"),
                                  ("- [X] 已阅读说明和\n  协议", "pass"),
-                                 ("- [ ] 已阅读说明和协议", "partial_match"),
-                                 ("- [x] 未阅读说明和协议", "partial_match")):
+                                 ("- [ ] 已阅读说明和协议", "no_match"),
+                                 ("- [x] 未阅读说明和协议", "no_match")):
             with self.subTest(choice=choice):
                 result = compliance.check_issue("确认", "### 确 认项\n" + choice, [template])
                 self.assertEqual(result["status"], expected)
@@ -673,7 +735,7 @@ class WhitespaceMatchingTests(unittest.TestCase):
             for content in ("请 输\t入", "请\n输入", "_No\u3000response_", "Noresponse", "\u00a0\u3000\t"):
                 with self.subTest(template=template["name"], content=content):
                     result = compliance.check_issue("[Bug] 测试", "### 问题描述\n" + content, [template])
-                    self.assertEqual(result["status"], "partial_match")
+                    self.assertEqual(result["status"], "no_match")
                     self.assertEqual(result["checks"][0]["problems"][0]["reason"], "empty_section")
 
     def test_allowed_values_and_prefills_use_same_whitespace_rules(self):
@@ -686,7 +748,7 @@ class WhitespaceMatchingTests(unittest.TestCase):
                 with self.subTest(kind=kind, content=content):
                     result = compliance.check_issue("测试", "### 选择项\n" + content, [template])
                     self.assertEqual(result["status"], "pass")
-            self.assertEqual(compliance.check_issue("测试", "### 选择项\n\u3000", [template])["status"], "partial_match")
+            self.assertEqual(compliance.check_issue("测试", "### 选择项\n\u3000", [template])["status"], "no_match")
 
     def test_optional_and_instruction_markers_ignore_whitespace(self):
         for instruction in ("填 写 说明", "Submission\t Instructions"):
@@ -806,7 +868,7 @@ body:
         selected = '已阅读 **说明** 和 [协议](https://example.test)'
         for body in ('', '### 确认项\n- [ ] ' + selected, '### 确认项\n- [x] 可选项'):
             with self.subTest(body=body):
-                self.assertEqual(compliance.check_issue('[Check] test', body, [template])['status'], 'partial_match')
+                self.assertEqual(compliance.check_issue('[Check] test', body, [template])['status'], 'no_match')
         for selected in (selected, '已阅读 说明 和 协议'):
             self.assertEqual(compliance.check_issue('[Check] test', '### **确认项**\n- [X] ' + selected,
                                                 [template])['status'], 'pass')
@@ -826,7 +888,7 @@ body:
                      '### 确认项\n' + choice,
                      '### 确认项\n- [ ] 已阅读 说明 和 协议\n### 其他\n- ' + choice):
             with self.subTest(body=body):
-                self.assertEqual(compliance.check_issue('[Check] test', body, [template])['status'], 'partial_match')
+                self.assertEqual(compliance.check_issue('[Check] test', body, [template])['status'], 'no_match')
 
     def test_checkbox_group_required_needs_one_known_checked_option(self):
         """验证必填复选框组至少有一个有效勾选。
@@ -839,7 +901,7 @@ body:
         template = self.checkbox_template(True)
         for option in template['body'][0]['attributes']['options']:
             option.pop('required', None)
-        for content, status in (('- [ ] 可选项', 'partial_match'), ('- [x] 陌生选项', 'partial_match'),
+        for content, status in (('- [ ] 可选项', 'no_match'), ('- [x] 陌生选项', 'no_match'),
                                 ('- [x] 可选项', 'pass')):
             self.assertEqual(compliance.check_issue('[Check] test', '### 确认项\n' + content,
                                                 [template])['status'], status)
@@ -864,11 +926,11 @@ body:
         for body, status, reason in (
             ('#### 一、问题描述（必填）\n启动失败', 'pass', None),
             ('#### 一、问题描述\n启动失败', 'pass', None),
-            ('#### 一、问题描述\n<!-- 请填写 -->', 'partial_match', 'empty_section'),
-            ('', 'partial_match', 'missing_section'),
-            ('#### 一、问题描述（必填）\n<!-- 请填写 -->', 'partial_match', 'empty_section'),
-            (template['body'][1]['attributes']['value'], 'partial_match', 'empty_section'),
-            ('```md\n#### 一、问题描述（必填）\n启动失败\n```', 'partial_match', 'missing_section'),
+            ('#### 一、问题描述\n<!-- 请填写 -->', 'no_match', 'empty_section'),
+            ('', 'no_match', 'missing_section'),
+            ('#### 一、问题描述（必填）\n<!-- 请填写 -->', 'no_match', 'empty_section'),
+            (template['body'][1]['attributes']['value'], 'no_match', 'empty_section'),
+            ('```md\n#### 一、问题描述（必填）\n启动失败\n```', 'no_match', 'missing_section'),
         ):
             with self.subTest(body=body):
                 result = compliance.check_issue(title, body, [template])
@@ -895,14 +957,14 @@ body:
                 {'type': 'textarea', 'attributes': attrs, 'validations': {'required': True}}]}
             with self.subTest(attrs=attrs):
                 self.assertEqual(compliance.check_issue('[Bug] 错误', '## 描述\n启动失败', [template])['status'], 'pass')
-                self.assertEqual(compliance.check_issue('[Bug] 错误', markdown, [template])['status'], 'partial_match')
-                self.assertEqual(compliance.check_issue('[Bug] 错误', '## 详细信息\n已填写', [template])['status'], 'partial_match')
+                self.assertEqual(compliance.check_issue('[Bug] 错误', markdown, [template])['status'], 'no_match')
+                self.assertEqual(compliance.check_issue('[Bug] 错误', '## 详细信息\n已填写', [template])['status'], 'no_match')
                 template['body'][0]['validations']['required'] = False
                 self.assertEqual(compliance.check_issue('[Bug] 错误', '', [template])['status'], 'pass')
         template['body'][0]['attributes'] = {'label': '内容', 'value': '默认内容'}
         template['body'][0]['validations']['required'] = True
         self.assertEqual(compliance.check_issue('[Bug] 错误', '## 内容\n默认内容', [template])['status'], 'pass')
-        self.assertEqual(compliance.check_issue('[Bug] 错误', '## 描述\n启动失败', [template])['status'], 'partial_match')
+        self.assertEqual(compliance.check_issue('[Bug] 错误', '## 描述\n启动失败', [template])['status'], 'no_match')
 
     def test_unnamed_fields_still_reject_uncheckable_or_invalid_values(self):
         """仅放宽可提取 Markdown 填写章节的文本框，不掩盖其他模板错误。
@@ -951,7 +1013,7 @@ body:
             ):
                 with self.subTest(header=header, body=body):
                     result = compliance.check_issue('[Doc] test', body, [template])
-                    self.assertEqual(result['status'], 'partial_match')
+                    self.assertEqual(result['status'], 'no_match')
                     self.assertTrue(any(p['field'] == field and p['reason'] == reason
                                         for p in result['checks'][0]['problems']))
             self.assertEqual(compliance.check_issue('其他', '无章节', [template])['status'], 'no_match')
@@ -986,7 +1048,7 @@ body:
         template = compliance.parse_template('```md\n### 代码中的标题\n```\n> ### 引用标题\n\n'
             '日志\n----\n```bash\nexample command\n```\n## **问题描述**\n<!-- 说明 -->', 'logs.md')
         self.assertEqual([f['attributes']['label'] for f in compliance._fields(template)], ['日志', '问题描述'])
-        for content, expected in (('actual command', 'pass'), ('example command', 'partial_match'), ('', 'partial_match')):
+        for content, expected in (('actual command', 'pass'), ('example command', 'no_match'), ('', 'no_match')):
             body = '### 日志\n```bash\n' + content + '\n```\n### 问题描述\n启动失败'
             self.assertEqual(compliance.check_issue('test', body, [template])['status'], expected)
         result = compliance.check_issue('test', '> ### 日志\n> 内容\n### 问题描述\n启动失败', [template])
@@ -1023,8 +1085,8 @@ body:
         required = compliance.parse_template('name: 缺陷\ntitle: "[Bug] "\nbody:\n- type: input\n  attributes:\n'
                                   '    label: 描述\n  validations:\n    required: true', 'bug.yml')
         result = compliance.check_issue('[Bug] test', '', [markdown, empty, required])
-        self.assertEqual(result['status'], 'partial_match')
-        self.assertEqual(result['matched_templates'], ['缺陷'])
+        self.assertEqual(result['status'], 'no_match')
+        self.assertEqual(result['matched_templates'], [])
         markdown['title'] = '[Doc] '
         for templates in ([markdown, required], [required, markdown]):
             result = compliance.check_issue('[Doc] test', '### 描述\n实际内容', templates)
@@ -1063,7 +1125,7 @@ body:
         """
         template = compliance.parse_template('name: 日志\nbody:\n- type: textarea\n  attributes:\n'
             '    label: 日志\n    render: bash\n    value: echo test\n  validations:\n    required: true', 'logs.yml')
-        for content, status in (('```bash\necho test\n```', 'pass'), ('```bash\n\n```', 'partial_match')):
+        for content, status in (('```bash\necho test\n```', 'pass'), ('```bash\n\n```', 'no_match')):
             self.assertEqual(compliance.check_issue('test', '### 日志\n' + content, [template])['status'], status)
 
 
@@ -1086,7 +1148,7 @@ class RequiredAndDropdownTests(unittest.TestCase):
                 label = attrs['label']
                 with self.subTest(key=key, marker=marker):
                     result = compliance.check_issue('[Test] 问题', '', [template])
-                    self.assertEqual(result['status'], 'partial_match')
+                    self.assertEqual(result['status'], 'no_match')
                     self.assertEqual(result['checks'][0]['problems'][0]['reason'], 'missing_section')
                     result = compliance.check_issue('[Test] 问题', f'### {label}\n实际问题', [template])
                     self.assertEqual(result['status'], 'pass')
@@ -1117,8 +1179,10 @@ class RequiredAndDropdownTests(unittest.TestCase):
             fields = [f for f in compliance._fields(template) if f.get('validations', {}).get('required')]
             self.assertEqual([f['attributes']['label'] for f in fields], expected)
             result = compliance.check_issue(template['title'] + '测试', '', [template])
-            self.assertEqual(result['status'], 'partial_match')
-            comment = compliance.format_compliance_check(result, templates=[template])
+            self.assertEqual(result['status'], 'no_match')
+            comment = compliance.format_compliance_check({"status": "no_match", "recommendation": {
+                "status": "needs_changes", "template": template["name"],
+                "problems": result["checks"][0]["problems"]}}, templates=[template])
             self.assertIn('提交内容规范性检查：未通过', comment)
             self.assertIn('缺少此必填章节', comment)
             body = '\n'.join('### ' + f['attributes']['label'] + '\n' +
@@ -1140,7 +1204,7 @@ class RequiredAndDropdownTests(unittest.TestCase):
                 'attributes': {'label': label, 'value': markdown}, 'validations': {'required': False}}]}
             fields = compliance._fields(template)
             self.assertEqual([f['validations']['required'] for f in fields], [True, True, False])
-            self.assertEqual(compliance.check_issue('[Test] 问题', '', [template])['status'], 'partial_match')
+            self.assertEqual(compliance.check_issue('[Test] 问题', '', [template])['status'], 'no_match')
             body = '### 描述（必填）\n启动失败\n### 日志（可选）\n错误日志'
             self.assertEqual(compliance.check_issue('[Test] 问题', body, [template])['status'], 'pass')
         template = compliance.parse_template('## 描述（必填）\n### 详情（可选）\n请填写', 'bug.md')
@@ -1158,8 +1222,8 @@ class RequiredAndDropdownTests(unittest.TestCase):
             'attributes': {'label': '确认', 'options': [
                 {'label': '已阅读（必选）', 'required': False}, {'label': '已搜索', 'required': True},
                 {'label': '其他（非必选）'}]}, 'validations': {'required': False}}]}
-        for content, status in (('- [x] 已搜索', 'partial_match'),
-                                ('- [x] 已阅读（必选）', 'partial_match'),
+        for content, status in (('- [x] 已搜索', 'no_match'),
+                                ('- [x] 已阅读（必选）', 'no_match'),
                                 ('- [x] 已阅读（必选）\n- [x] 已搜索', 'pass')):
             result = compliance.check_issue('[Test] 问题', '### 确认\n' + content, [template])
             self.assertEqual(result['status'], status)
@@ -1183,12 +1247,12 @@ class RequiredAndDropdownTests(unittest.TestCase):
                                        (',Linux', False), ('Linux,,Windows', False)):
                     with self.subTest(multiple=multiple, required=required, content=content):
                         result = compliance.check_issue('[Test] 问题', '### 平台\n' + content, [template])
-                        self.assertEqual(result['status'], 'pass' if valid else 'partial_match')
+                        self.assertEqual(result['status'], 'pass' if valid else 'no_match')
                         if not valid:
                             self.assertEqual(result['checks'][0]['problems'][0]['reason'], 'invalid_option')
                 for body in ('', '### 平台\n', '### 平台\n_No response_'):
                     result = compliance.check_issue('[Test] 问题', body, [template])
-                    self.assertEqual(result['status'], 'partial_match' if required else 'pass')
+                    self.assertEqual(result['status'], 'no_match' if required else 'pass')
 
     def test_dropdown_accepts_unique_categories_with_refined_annotations(self):
         """下拉类别唯一时允许改写括号说明，单选和多选仍拒绝未知类别。
@@ -1212,7 +1276,7 @@ class RequiredAndDropdownTests(unittest.TestCase):
                 ('缺陷修正错误', False), ('缺陷修正（描述不准确', False)):
                 with self.subTest(multiple=multiple, value=value):
                     result = compliance.check_issue('[文档] 权限说明', '### 文档类型\n' + value, [template])
-                    self.assertEqual(result['status'], 'pass' if valid else 'partial_match')
+                    self.assertEqual(result['status'], 'pass' if valid else 'no_match')
                     if not valid:
                         self.assertEqual(result['checks'][0]['problems'][0]['reason'], 'invalid_option')
 
@@ -1231,7 +1295,7 @@ class RequiredAndDropdownTests(unittest.TestCase):
                              ('Linux（未知架构）', False), ('Windows（版本 11）', True)):
             with self.subTest(value=value):
                 result = compliance.check_issue('[Test] 问题', '### 平台\n' + value, [template])
-                self.assertEqual(result['status'], 'pass' if valid else 'partial_match')
+                self.assertEqual(result['status'], 'pass' if valid else 'no_match')
 
     def test_required_config_still_overrides_optional_label(self):
         """字段名写可选也不能抵消 required true 的必填配置。
@@ -1243,7 +1307,7 @@ class RequiredAndDropdownTests(unittest.TestCase):
         """
         template = {'name': '测试', 'title': '[Test]', 'body': [{'type': 'input',
             'attributes': {'label': '信息（可选）'}, 'validations': {'required': True}}]}
-        self.assertEqual(compliance.check_issue('[Test] 问题', '', [template])['status'], 'partial_match')
+        self.assertEqual(compliance.check_issue('[Test] 问题', '', [template])['status'], 'no_match')
 
 
     def test_adjacent_notice_requires_every_checkbox(self):
@@ -1266,13 +1330,15 @@ class RequiredAndDropdownTests(unittest.TestCase):
                 body = '### 提交前确认清单\n' + '\n'.join(
                     f"- [{'x' if index in selected else ' '}] {label}" for index, label in enumerate(labels))
                 result = compliance.check_issue('[Task|任务]: 测试', body, [template])
-                self.assertEqual(result['status'], 'pass' if len(selected) == 2 else 'partial_match')
+                self.assertEqual(result['status'], 'pass' if len(selected) == 2 else 'no_match')
                 for index, label in enumerate(labels):
                     if index not in selected:
                         self.assertIn('请勾选必选项：' + label,
                                       [p['message'] for p in result['checks'][0]['problems']])
                 if len(selected) == 1:
-                    comment = compliance.format_compliance_check(result, templates=[template])
+                    comment = compliance.format_compliance_check({"status": "no_match", "recommendation": {
+                        "status": "needs_changes", "template": template["name"],
+                        "problems": result["checks"][0]["problems"]}}, templates=[template])
                     self.assertIn('提交内容规范性检查：未通过', comment)
                     self.assertIn('请勾选必选项', comment)
         self.assertEqual(json.dumps(template), original)
